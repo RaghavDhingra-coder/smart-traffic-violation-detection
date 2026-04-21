@@ -1,0 +1,93 @@
+# TODO for repository-hygiene: refine ignore rules if the team introduces new tooling, test runners, or deployment artifacts.
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+ENV/
+dist/
+build/
+site/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Backend uploads and temp data
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/*.db
+backend/*.sqlite3
+
+# Alembic and Python local artifacts
+backend/alembic/__pycache__/
+ai-engine/__pycache__/
+backend/__pycache__/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# Docker and container runtime files
+docker-data/
+*.pid
+
+# Redis / Postgres local dumps
+*.rdb
+*.sql
+*.sqlite
+
+# AI model artifacts and outputs
+ai-engine/models/*
+!ai-engine/models/.gitkeep
+*.pt
+*.onnx
+*.engine
+*.pth
+*.ckpt
+
+# Media and generated evidence
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.webm
+
