@@ -3,9 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: traffic-postgres
     environment:
-      POSTGRES_DB: traffic_violation_db
-      POSTGRES_USER: traffic_admin
-      POSTGRES_PASSWORD: traffic_password
+      POSTGRES_DB: traffic
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
     ports:
       - "5432:5432"
 
@@ -14,4 +14,3 @@ services:
     container_name: traffic-redis
     ports:
       - "6379:6379"
-

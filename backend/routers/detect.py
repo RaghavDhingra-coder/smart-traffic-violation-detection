@@ -1,5 +1,6 @@
 # TODO for detection-router: optimize video frame sampling, add background jobs, and improve failure reporting for long uploads.
 import base64
+import binascii
 import imghdr
 import tempfile
 from pathlib import Path
@@ -9,7 +10,13 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from schemas.detection import DetectionResult, ViolationOut
-from services.detection_service import run_detection
+from services.detection_service import (
+    DetectionResponseError,
+    DetectionServiceError,
+    DetectionUpstreamError,
+    run_detection,
+    store_detected_violations,
+)
 
 router = APIRouter(prefix="/detect", tags=["detect"])
 
@@ -27,7 +34,7 @@ async def detect_from_frame(payload: DetectRequest):
     try:
         encoded = payload.frame.split(",")[-1]
         image_bytes = base64.b64decode(encoded)
-    except Exception as exc:  # noqa: BLE001
+    except (ValueError, binascii.Error) as exc:
         raise HTTPException(status_code=400, detail="Invalid base64 frame payload") from exc
 
     suffix = ".jpg"
@@ -37,11 +44,16 @@ async def detect_from_frame(payload: DetectRequest):
 
     try:
         violations = await run_detection(temp_path, source=payload.source)
+        await store_detected_violations(violations, location=payload.source)
         return DetectionResult(violations=violations)
+    except DetectionResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except DetectionUpstreamError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except DetectionServiceError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Detection failed: {exc}") from exc
     finally:
         Path(temp_path).unlink(missing_ok=True)
 
@@ -65,9 +77,14 @@ async def detect_from_upload(file: UploadFile = File(...)):
             temp_path = temp_file.name
         try:
             violations = await run_detection(temp_path, source="upload")
+            await store_detected_violations(violations, location="upload")
             processed = 1
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"Image detection failed: {exc}") from exc
+        except DetectionResponseError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except DetectionUpstreamError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DetectionServiceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         finally:
             Path(temp_path).unlink(missing_ok=True)
         return DetectionResult(violations=violations, total_frames_processed=processed)
@@ -93,16 +110,21 @@ async def detect_from_upload(file: UploadFile = File(...)):
                     frame_path = frame_file.name
                 try:
                     frame_results = await run_detection(frame_path, source="upload")
+                    await store_detected_violations(frame_results, location="upload")
                     violations.extend(frame_results)
                     processed += 1
                 finally:
                     Path(frame_path).unlink(missing_ok=True)
             frame_index += 1
         capture.release()
+    except DetectionResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except DetectionUpstreamError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except DetectionServiceError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Video detection failed: {exc}") from exc
     finally:
         Path(video_path).unlink(missing_ok=True)
 

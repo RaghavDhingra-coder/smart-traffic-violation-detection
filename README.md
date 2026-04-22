@@ -76,7 +76,7 @@ Default scaffold values are already suitable for local development.
 
 Important variables:
 
-- `DATABASE_URL=postgresql+psycopg2://traffic_admin:traffic_password@postgres:5432/traffic_violation_db`
+- `DATABASE_URL=postgresql+psycopg2://postgres:1234@postgres:5432/traffic`
 - `REDIS_URL=redis://redis:6379/0`
 - `AI_ENGINE_URL=http://ai-engine:8001`
 - `VITE_API_BASE_URL=/api`
@@ -90,7 +90,7 @@ If you run backend and AI engine locally instead of via Docker, you will usually
 Example local-development values:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://traffic_admin:traffic_password@localhost:5432/traffic_violation_db
+DATABASE_URL=postgresql+psycopg2://postgres:1234@localhost:5432/traffic
 REDIS_URL=redis://localhost:6379/0
 AI_ENGINE_URL=http://localhost:8001
 VITE_API_BASE_URL=http://localhost:8000
@@ -146,7 +146,7 @@ docker-compose ps
 Use local hostnames for services your machine will call directly:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://traffic_admin:traffic_password@localhost:5432/traffic_violation_db
+DATABASE_URL=postgresql+psycopg2://postgres:1234@localhost:5432/traffic
 REDIS_URL=redis://localhost:6379/0
 AI_ENGINE_URL=http://localhost:8001
 VITE_API_BASE_URL=http://localhost:8000
@@ -204,9 +204,9 @@ Then open:
 
 PostgreSQL is provisioned by Docker Compose with:
 
-- database: `traffic_violation_db`
-- username: `traffic_admin`
-- password: `traffic_password`
+- database: `traffic`
+- username: `postgres`
+- password: `1234`
 - port: `5432`
 
 Data is persisted in the Docker volume:
