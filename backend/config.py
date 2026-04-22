@@ -1,5 +1,5 @@
 # TODO for backend-configuration: add environment-specific settings profiles and secrets management before production.
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
