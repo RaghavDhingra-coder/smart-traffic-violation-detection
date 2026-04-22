@@ -1,71 +1,84 @@
-# TODO for violation-detector: replace heuristic stubs with trained classes, tracking, and zone-aware business rules.
-import base64
-from pathlib import Path
+"""YOLOv8 detector module for Phase 1 real-time object detection."""
 
-import cv2
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List
+
 import numpy as np
 from ultralytics import YOLO
 
+# YOLO class IDs (COCO)
+TARGET_CLASS_IDS = {0, 2, 3}
+DEFAULT_MODEL_PATH = "yolov8n.pt"
 
-class ViolationDetector:
-    def __init__(self) -> None:
-        model_path = Path("models/best.pt")
-        selected_model = str(model_path) if model_path.exists() else "yolov8n.pt"
-        # STUB: replace with real implementation by loading a violation-specific YOLOv8 model.
-        self.model = YOLO(selected_model)
-        self.no_parking_zone = np.array([[40, 40], [500, 40], [500, 300], [40, 300]], dtype=np.int32)
 
-    def detect(self, image: np.ndarray) -> list[dict]:
-        height, width = image.shape[:2]
-        detections: list[dict] = []
+@dataclass(frozen=True)
+class Detection:
+    """Represents a single filtered detection."""
 
-        # STUB: replace with real implementation that maps YOLO detections to violation classes.
-        mock_plate_crop = image[max(0, height // 4):max(height // 4 + 80, 80), max(0, width // 4):max(width // 4 + 180, 180)]
-        detections.append(
-            {
-                "violation_type": "no_helmet",
-                "confidence": 0.91,
-                "bbox": [50, 50, min(width - 20, 280), min(height - 20, 260)],
-                "plate_crop": mock_plate_crop,
-            }
-        )
+    class_id: int
+    class_name: str
+    confidence: float
+    bbox: tuple[int, int, int, int]
 
-        # STUB: replace with real implementation for multi-rider detection and person counting.
-        detections.append(
-            {
-                "violation_type": "trippling",
-                "confidence": 0.78,
-                "bbox": [max(10, width // 3), max(10, height // 3), min(width - 20, width // 3 + 220), min(height - 20, height // 3 + 180)],
-                "plate_crop": mock_plate_crop,
-            }
-        )
 
-        # STUB: replace with real implementation using calibrated parking polygons and object persistence.
-        centroid = (width // 2, height // 2)
-        zone_hit = cv2.pointPolygonTest(self.no_parking_zone, centroid, False) >= 0
-        if zone_hit:
+class YOLODetector:
+    """Wrapper around Ultralytics YOLO model with class filtering."""
+
+    def __init__(
+        self,
+        model_path: str = DEFAULT_MODEL_PATH,
+        conf_threshold: float = 0.6,
+        max_detections: int = 20,
+    ) -> None:
+        self.model_path = self._resolve_model_path(model_path)
+        self.conf_threshold = conf_threshold
+        self.max_detections = max_detections
+        self.model = YOLO(self.model_path)
+
+        # Keep names as a plain dict for fast lookup and future extension.
+        self.class_names: Dict[int, str] = dict(self.model.names)
+
+    @staticmethod
+    def _resolve_model_path(model_path: str) -> str:
+        """Prefer local model file path if present; fall back to model name for auto-download."""
+        path = Path(model_path)
+        if path.exists():
+            return str(path)
+        return model_path
+
+    def detect(self, frame: np.ndarray) -> List[Detection]:
+        """Run inference and return only person, car, and motorcycle detections."""
+        # Optimization 3: higher confidence + capped detections reduce compute and clutter.
+        results = self.model(frame, conf=self.conf_threshold, max_det=self.max_detections, verbose=False)
+        if not results:
+            return []
+
+        detections: List[Detection] = []
+        result = results[0]
+
+        for box in result.boxes:
+            class_id = int(box.cls.item())
+            if class_id not in TARGET_CLASS_IDS:
+                continue
+
+            confidence = float(box.conf.item())
+            # Optimization 4: strict pre-tracker confidence filtering.
+            if confidence <= 0.5:
+                continue
+
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            class_name = self.class_names.get(class_id, str(class_id))
+
             detections.append(
-                {
-                    "violation_type": "no_parking",
-                    "confidence": 0.66,
-                    "bbox": [80, max(20, height // 2 - 80), min(width - 20, 360), min(height - 20, height // 2 + 120)],
-                    "plate_crop": mock_plate_crop,
-                }
+                Detection(
+                    class_id=class_id,
+                    class_name=class_name,
+                    confidence=confidence,
+                    bbox=(x1, y1, x2, y2),
+                )
             )
 
         return detections
-
-    def annotate_frame(self, image: np.ndarray, detections: list[dict]) -> str:
-        annotated = image.copy()
-        cv2.polylines(annotated, [self.no_parking_zone], True, (0, 165, 255), 2)
-
-        for detection in detections:
-            x1, y1, x2, y2 = detection["bbox"]
-            label = f"{detection['violation_type']} ({detection['confidence']:.2f})"
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(annotated, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        success, buffer = cv2.imencode(".jpg", annotated)
-        if not success:
-            return ""
-        return base64.b64encode(buffer.tobytes()).decode("utf-8")
