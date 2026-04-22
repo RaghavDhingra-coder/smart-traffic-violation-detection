@@ -1,4 +1,6 @@
 # TODO for backend-application: add structured logging, auth, and startup health probes before production rollout.
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
