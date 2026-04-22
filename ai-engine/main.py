@@ -1,74 +1,104 @@
-# TODO for ai-engine-application: add batching, model warmup, and production observability for inference workloads.
-import base64
+"""Phase 1 entry point: real-time webcam/video object detection using YOLOv8."""
+
+from __future__ import annotations
+
+import argparse
+import time
 
 import cv2
-import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-from detector import ViolationDetector
-from ocr import PlateOCR
+from detector import YOLODetector
+from tracker import ObjectTracker
+from utils import draw_detections, draw_fps
 
-app = FastAPI(title="Traffic Violation AI Engine", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # STUB: replace with real implementation using explicit trusted origins.
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-detector = ViolationDetector()
-ocr = PlateOCR()
+FRAME_SIZE = (416, 256)
+WINDOW_NAME = "Phase 2 - Object Detection + Tracking"
 
 
-class RunRequest(BaseModel):
-    image_base64: str
-    source: str
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Real-time object detection with YOLOv8")
+    parser.add_argument(
+        "--source",
+        default="0",
+        help="Video source. Use 0 for webcam, or pass a video file path.",
+    )
+    parser.add_argument(
+        "--model",
+        default="yolov8n.pt",
+        help="Path or name of YOLOv8 model (default: yolov8n.pt)",
+    )
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=0.6,
+        help="Confidence threshold for detections (default: 0.6)",
+    )
+    return parser.parse_args()
 
-    class Config:
-        orm_mode = True
+
+def build_capture(source: str) -> cv2.VideoCapture:
+    # Keep default behavior exactly as requested: webcam source 0.
+    if source.isdigit():
+        return cv2.VideoCapture(int(source))
+    return cv2.VideoCapture(source)
 
 
-@app.get("/")
-async def root():
-    return {"message": "Traffic Violation AI Engine is running"}
+def main() -> None:
+    args = parse_args()
+    capture = build_capture(args.source)
 
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-@app.post("/run")
-async def run_detection(payload: RunRequest):
-    try:
-        image_bytes = base64.b64decode(payload.image_base64)
-        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-        image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("Failed to decode input image")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Invalid image payload: {exc}") from exc
+    if not capture.isOpened():
+        print("Error: Unable to open camera/video source. Check webcam connection or source path.")
+        capture.release()
+        return
 
     try:
-        detections = detector.detect(image)
-        annotated_frame = detector.annotate_frame(image, detections)
-        violations = []
-        for detection in detections:
-            plate_number = None
-            plate_crop = detection.get("plate_crop")
-            if plate_crop is not None:
-                plate_number = ocr.extract_plate(plate_crop)
-            violations.append(
-                {
-                    "type": detection["violation_type"],
-                    "confidence": detection["confidence"],
-                    "plate_number": plate_number,
-                    "annotated_frame_base64": annotated_frame,
-                }
-            )
-        return {"violations": violations}
+        detector = YOLODetector(model_path=args.model, conf_threshold=args.conf)
+        tracker = ObjectTracker()
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
+        print(f"Error: Failed to initialize detector/tracker: {exc}")
+        capture.release()
+        return
+
+    prev_time = time.perf_counter()
+    frame_count = 0
+
+    try:
+        while True:
+            success, frame = capture.read()
+            if not success:
+                print("Info: End of stream or frame read failed. Exiting.")
+                break
+
+            # Optimization 1: smaller frame for faster inference.
+            frame = cv2.resize(frame, FRAME_SIZE)
+
+            # Optimization 2: run detector/tracker on every second frame.
+            frame_count += 1
+            if frame_count % 2 != 0:
+                continue
+
+            detections = detector.detect(frame)
+            tracked_objects = tracker.update(detections, frame)
+
+            draw_detections(frame, tracked_objects, class_names=detector.class_names, min_confidence=0.5)
+
+            current_time = time.perf_counter()
+            fps = 1.0 / max(current_time - prev_time, 1e-6)
+            prev_time = current_time
+            draw_fps(frame, fps)
+
+            cv2.imshow(WINDOW_NAME, frame)
+
+            # ESC key to exit
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+    except KeyboardInterrupt:
+        print("Info: Interrupted by user. Exiting safely.")
+    finally:
+        capture.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
