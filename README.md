@@ -1,4 +1,3 @@
-# TODO for project-documentation: expand deployment, security hardening, and production observability before shipping.
 # Traffic Violation Detection System
 
 A hackathon-ready scaffold for a traffic violation detection platform with:
@@ -12,6 +11,45 @@ A hackathon-ready scaffold for a traffic violation detection platform with:
 - Docker Compose support
 
 This scaffold is designed so each team member can immediately start working in their own module with minimal setup friction.
+
+## AI Engine Progress (Completed Till Phase 3)
+
+### Phase 1: Vehicle Detection
+
+- YOLOv8 vehicle/person detection is integrated in `ai-engine/detector.py`
+- Real-time frame loop runs in `ai-engine/main.py`
+
+### Phase 2: Object Tracking
+
+- DeepSORT tracking with persistent `track_id` is integrated in `ai-engine/tracker.py`
+- Bounding boxes + IDs render in `ai-engine/utils.py`
+
+### Phase 3: Number Plate Detection + OCR
+
+- Plate detection model integration in `ai-engine/plate_detector.py`
+- OCR pipeline in `ai-engine/ocr.py` with:
+  - preprocessing variants
+  - text cleaning and normalization
+  - plate plausibility filtering
+- Main pipeline in `ai-engine/main.py` now supports:
+  - vehicle -> track -> plate detect -> OCR -> plate attach
+  - per-track caching
+  - retry logic
+  - OCR vote confirmation
+  - debug windows/logs for diagnosis
+
+Final live pipeline:
+
+```text
+Frame
+  -> Vehicle Detection (YOLOv8)
+  -> DeepSORT Tracking
+  -> Vehicle Crop
+  -> Plate Detection (YOLO plate model + fallback)
+  -> OCR (EasyOCR)
+  -> Plate text attach to track_id
+  -> Render labels
+```
 
 ## Project Structure
 
@@ -250,17 +288,26 @@ Note:
 
 ## How To Add The Trained YOLOv8 Model
 
-Place your trained YOLO weights file here:
+Place model files inside `ai-engine/` as follows:
 
-- [ai-engine/models](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\ai-engine\models)
+- Vehicle detector:
+  - `ai-engine/yolov8n.pt` (or pass a custom model with `--model`)
+- Plate detector (Phase 3):
+  - `ai-engine/models/plate_model.pt`
 
-Expected filename:
+Expected structure:
 
 ```text
-ai-engine/models/best.pt
+ai-engine/
+  ├── yolov8n.pt
+  └── models/
+      └── plate_model.pt
 ```
 
-If `best.pt` is not present, the AI engine falls back to `yolov8n.pt`.
+Notes:
+
+- If `models/plate_model.pt` is missing, plate YOLO falls back to heuristic plate localization.
+- If you are running in Docker and add/replace model files, rebuild/restart the AI service.
 
 If you are running the AI engine in Docker and add a new model, restart that service:
 
@@ -269,6 +316,35 @@ docker-compose up --build ai-engine
 ```
 
 If you are running the AI engine locally, just restart the local process.
+
+## Run AI Engine (Phase 3 CV Pipeline)
+
+From `ai-engine/`:
+
+```bash
+python main.py
+```
+
+Useful debug modes:
+
+```bash
+# Show plate crops used by OCR
+python main.py --debug-plate
+
+# Print OCR pipeline decision logs (skip reason / success)
+python main.py --debug-ocr
+
+# Enable both
+python main.py --debug-plate --debug-ocr
+```
+
+Debug log meanings:
+
+- `ocr_ok`: plate confirmed and attached to track
+- `ocr_candidate(1/2)`: one valid hit seen; waiting for confirmation vote
+- `ocr_empty`: OCR attempt ran but returned no valid plate-like text
+- `low_conf(...)`: object confidence below OCR trigger threshold
+- `small_bbox(...)`: object area too small for reliable OCR
 
 ## API Endpoints
 

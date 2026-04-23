@@ -52,7 +52,14 @@ def draw_detections(
 
         track_id = getattr(detection, "track_id", None)
         if track_id is not None:
-            label = f"{class_name} ID:{track_id} {detection.confidence:.2f}"
+            plate_text = getattr(detection, "plate", None)
+            if plate_text is None:
+                # Backward compatibility with older annotated objects.
+                plate_text = getattr(detection, "plate_text", None)
+            if plate_text:
+                label = f"{class_name} ID:{track_id} {plate_text}"
+            else:
+                label = f"{class_name} ID:{track_id}"
         else:
             label = f"{class_name} {detection.confidence:.2f}"
 
