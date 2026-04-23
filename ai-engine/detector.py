@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+
+# Keep Ultralytics cache/config within project to avoid user-profile permission issues.
+_PROJECT_DIR = Path(__file__).resolve().parent
+_ULTRALYTICS_DIR = _PROJECT_DIR / ".ultralytics"
+_ULTRALYTICS_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", str(_ULTRALYTICS_DIR))
+
 from ultralytics import YOLO
 
 # YOLO class IDs (COCO)
