@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -18,13 +19,15 @@ from utils import draw_detections, draw_fps
 from violations.helmet import detect_no_helmet
 from violations.triple_riding import detect_triple_riding
 
-FRAME_SIZE = (416, 256)
+DEFAULT_FRAME_SIZE = (352, 224)
+WEBCAM_FRAME_SIZE = (224, 128)
 WINDOW_NAME = "Phase 2 - Object Detection + Tracking"
 PLATE_DEBUG_WINDOW = "Plate Crop Debug"
 OCR_MIN_BBOX_AREA = 12000
 OCR_MIN_CONFIDENCE = 0.35
 OCR_ALLOWED_CLASSES = {"car", "motorcycle"}
-OCR_RETRY_INTERVAL_FRAMES = 18
+OCR_RETRY_INTERVAL_FRAMES = 30
+WEBCAM_OCR_RETRY_INTERVAL_FRAMES = 45
 OCR_MAX_TRACKS_PER_FRAME = 1
 OCR_MAX_ATTEMPTS_PER_TRACK = 3
 OCR_ENABLE_FULL_FRAME_FALLBACK = False
@@ -32,13 +35,18 @@ VEHICLE_LIKE_MIN_AREA = 30000
 VEHICLE_LIKE_MIN_ASPECT = 1.20
 OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
+CAMERA_FRAME_READ_TIMEOUT_SEC = 5.0
+VIDEO_PROCESS_EVERY_N_FRAMES = 3
+WEBCAM_PROCESS_EVERY_N_FRAMES = 4
+VIDEO_MAX_DETECTIONS = 20
+WEBCAM_MAX_DETECTIONS = 8
 
 
 @dataclass(frozen=True)
 class AnnotatedTrackedObject:
     """Tracked object with optional OCR plate text for rendering."""
 
-    track_id: int
+    track_id: Optional[int]
     class_id: int
     confidence: float
     bbox: tuple[int, int, int, int]
@@ -139,36 +147,130 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable plate detector + OCR for higher FPS.",
     )
+    parser.add_argument(
+        "--enable-ocr",
+        action="store_true",
+        help="Enable OCR in webcam mode. Off by default for smoother live preview.",
+    )
+    parser.add_argument(
+        "--enable-tracking",
+        action="store_true",
+        help="Enable DeepSORT tracking and violation logic in webcam mode. Off by default for higher FPS.",
+    )
+    parser.add_argument(
+        "--accurate-tracking",
+        action="store_true",
+        help="Use DeepSORT appearance embeddings for more stable IDs at the cost of lower FPS.",
+    )
     return parser.parse_args()
 
 
 def build_capture(source: str) -> cv2.VideoCapture:
-    # Keep default behavior exactly as requested: webcam source 0.
+    """
+    Build a video capture with a couple of backend fallbacks.
+
+    On macOS, explicitly trying AVFoundation helps avoid flaky default backend
+    selection and camera authorization edge cases.
+    """
     if source.isdigit():
-        return cv2.VideoCapture(int(source))
+        source_index = int(source)
+        attempts: list[cv2.VideoCapture] = []
+
+        if platform.system() == "Darwin":
+            attempts.append(cv2.VideoCapture(source_index, cv2.CAP_AVFOUNDATION))
+
+        attempts.append(cv2.VideoCapture(source_index))
+
+        for capture in attempts:
+            if capture.isOpened():
+                # Keep webcam latency down on slower CPU-only runs.
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                return capture
+            capture.release()
+
+        return cv2.VideoCapture(source_index)
+
     return cv2.VideoCapture(source)
+
+
+def print_capture_error(source: str) -> None:
+    """Print a clearer source-specific capture failure message."""
+    print("Error: Unable to open camera/video source. Check webcam connection or source path.")
+    if source.isdigit():
+        print("Hint: For webcam input on macOS, allow camera access for your Terminal app in")
+        print("System Settings -> Privacy & Security -> Camera, then retry `python3 main.py --source 0`.")
+    else:
+        print(f"Hint: Verify that the file exists and is readable: {source}")
+
+
+def get_runtime_settings(source: str) -> tuple[tuple[int, int], int, int, int]:
+    """Use lighter defaults for webcam mode so the preview stays responsive."""
+    if source.isdigit():
+        return (
+            WEBCAM_FRAME_SIZE,
+            WEBCAM_PROCESS_EVERY_N_FRAMES,
+            WEBCAM_OCR_RETRY_INTERVAL_FRAMES,
+            WEBCAM_MAX_DETECTIONS,
+        )
+    return DEFAULT_FRAME_SIZE, VIDEO_PROCESS_EVERY_N_FRAMES, OCR_RETRY_INTERVAL_FRAMES, VIDEO_MAX_DETECTIONS
+
+
+def is_ocr_enabled(args: argparse.Namespace) -> bool:
+    """Keep webcam mode responsive by default; OCR stays on for file inputs."""
+    if args.disable_ocr:
+        return False
+    if args.source.isdigit():
+        return args.enable_ocr
+    return True
+
+
+def is_tracking_enabled(args: argparse.Namespace) -> bool:
+    """Keep webcam mode responsive by default; tracking stays on for file inputs."""
+    if args.source.isdigit():
+        return args.enable_tracking
+    return True
 
 
 def main() -> None:
     args = parse_args()
+    cv2.setUseOptimized(True)
     capture = build_capture(args.source)
 
     if not capture.isOpened():
-        print("Error: Unable to open camera/video source. Check webcam connection or source path.")
+        print_capture_error(args.source)
         capture.release()
         return
 
+    ocr_enabled = is_ocr_enabled(args)
+    tracking_enabled = is_tracking_enabled(args)
+
+    if args.source.isdigit() and not ocr_enabled:
+        print("Info: Webcam fast mode enabled. OCR is off by default to keep the live preview responsive.")
+        print("Hint: Add `--enable-ocr` only if you need number plate reading and can accept lower FPS.")
+    if args.source.isdigit() and not tracking_enabled:
+        print("Info: Webcam fast mode keeps tracking and violation checks off by default for higher FPS.")
+        print("Hint: Add `--enable-tracking` only if you need stable IDs and can accept lower FPS.")
+    if tracking_enabled and not args.accurate_tracking:
+        print("Info: Fast tracking mode uses motion/IoU-only association for better FPS.")
+        print("Hint: Add `--accurate-tracking` if you need stronger ID persistence across occlusions.")
+
     try:
-        detector = YOLODetector(model_path=args.model, conf_threshold=args.conf)
-        tracker = ObjectTracker()
-        plate_detector = None if args.disable_ocr else PlateDetector()
+        frame_size, process_every_n_frames, ocr_retry_interval_frames, max_detections = get_runtime_settings(args.source)
+        detector = YOLODetector(model_path=args.model, conf_threshold=args.conf, max_detections=max_detections)
+        tracker = ObjectTracker(use_appearance=args.accurate_tracking) if tracking_enabled else None
+        plate_detector = None if not ocr_enabled else PlateDetector()
     except Exception as exc:  # noqa: BLE001
         print(f"Error: Failed to initialize detector/tracker: {exc}")
         capture.release()
         return
 
     prev_time = time.perf_counter()
+    last_frame_time = prev_time
     frame_count = 0
+    last_processed_fps = 0.0
+    last_annotated_objects: list[AnnotatedTrackedObject] = []
     # Cache successful OCR output per track.
     known_plates: dict[int, Optional[str]] = {}
     plate_votes: dict[int, dict[str, int]] = {}
@@ -184,22 +286,76 @@ def main() -> None:
         while True:
             success, frame = capture.read()
             if not success:
+                if args.source.isdigit() and (time.perf_counter() - last_frame_time) >= CAMERA_FRAME_READ_TIMEOUT_SEC:
+                    print("Error: Camera opened but no frames arrived for 5 seconds. Exiting.")
+                    print("Hint: Close other apps using the webcam, then retry with `python3 main.py --source 0 --disable-ocr`.")
+                    break
                 print("Info: End of stream or frame read failed. Exiting.")
                 break
+            last_frame_time = time.perf_counter()
 
             original_frame = frame
             orig_h, orig_w = original_frame.shape[:2]
-
-            # Optimization 1: smaller frame for faster inference.
-            frame = cv2.resize(frame, FRAME_SIZE)
+            frame = cv2.resize(frame, frame_size)
             proc_h, proc_w = frame.shape[:2]
 
-            # Optimization 2: run detector/tracker on every second frame.
             frame_count += 1
-            if frame_count % 2 != 0:
+            should_process = frame_count % process_every_n_frames == 0
+
+            if not should_process:
+                if last_annotated_objects:
+                    draw_detections(frame, last_annotated_objects, class_names=detector.class_names, min_confidence=0.5)
+                draw_fps(frame, last_processed_fps)
+                cv2.putText(
+                    frame,
+                    f"Live mode: inference every {process_every_n_frames} frames",
+                    (8, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow(WINDOW_NAME, frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
                 continue
 
             detections = detector.detect(frame)
+
+            if not tracking_enabled:
+                annotated_objects = [
+                    AnnotatedTrackedObject(
+                        track_id=None,
+                        class_id=det.class_id,
+                        confidence=det.confidence,
+                        bbox=det.bbox,
+                    )
+                    for det in detections
+                ]
+                last_annotated_objects = annotated_objects
+                draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
+
+                current_time = time.perf_counter()
+                fps = 1.0 / max(current_time - prev_time, 1e-6)
+                prev_time = current_time
+                last_processed_fps = fps
+                draw_fps(frame, last_processed_fps)
+                cv2.putText(
+                    frame,
+                    f"Fast webcam mode: detect every {process_every_n_frames} frames",
+                    (8, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow(WINDOW_NAME, frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+                continue
+
             tracked_objects = tracker.update(detections, frame)
 
             # Phase 4: violation detection on tracked objects.
@@ -263,14 +419,14 @@ def main() -> None:
                 plate = known_plates.get(obj.track_id)
 
                 # OCR/detection runs only for unseen plate tracks with retry backoff.
-                last_attempt = last_ocr_attempt_frame.get(obj.track_id, -OCR_RETRY_INTERVAL_FRAMES)
-                should_retry_now = (frame_count - last_attempt) >= OCR_RETRY_INTERVAL_FRAMES
+                last_attempt = last_ocr_attempt_frame.get(obj.track_id, -ocr_retry_interval_frames)
+                should_retry_now = (frame_count - last_attempt) >= ocr_retry_interval_frames
                 attempts_so_far = ocr_attempt_count.get(obj.track_id, 0)
                 is_vehicle_candidate = class_name in OCR_ALLOWED_CLASSES or is_vehicle_like_bbox(obj.bbox)
                 is_prioritized = obj.track_id in prioritized_track_set
 
                 if (
-                    not args.disable_ocr
+                    ocr_enabled
                     and obj.track_id not in known_plates
                     and should_retry_now
                     and attempts_so_far < OCR_MAX_ATTEMPTS_PER_TRACK
@@ -404,12 +560,25 @@ def main() -> None:
                     )
                 )
 
+            last_annotated_objects = annotated_objects
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
 
             current_time = time.perf_counter()
             fps = 1.0 / max(current_time - prev_time, 1e-6)
             prev_time = current_time
-            draw_fps(frame, fps)
+            last_processed_fps = fps
+            draw_fps(frame, last_processed_fps)
+            if args.source.isdigit():
+                cv2.putText(
+                    frame,
+                    f"Live mode: inference every {process_every_n_frames} frames",
+                    (8, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
             cv2.imshow(WINDOW_NAME, frame)
 
