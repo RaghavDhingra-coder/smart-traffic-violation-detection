@@ -150,9 +150,10 @@ def extract_text(image: np.ndarray) -> Optional[str]:
 
             for text in candidate_texts:
                 normalized = normalize_plate_text(text)
-                score = len(normalized)
                 if is_plausible_plate(normalized):
-                    score += 8
+                    return normalized
+
+                score = len(normalized)
                 if any(ch.isalpha() for ch in normalized) and any(ch.isdigit() for ch in normalized):
                     score += 2
                 if len(normalized) < 6:

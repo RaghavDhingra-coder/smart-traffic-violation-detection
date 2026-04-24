@@ -45,6 +45,10 @@ class YOLODetector:
         self.conf_threshold = conf_threshold
         self.max_detections = max_detections
         self.model = YOLO(self.model_path)
+        try:
+            self.model.fuse()
+        except Exception:  # noqa: BLE001
+            pass
 
         # Keep names as a plain dict for fast lookup and future extension.
         self.class_names: Dict[int, str] = dict(self.model.names)
@@ -60,7 +64,13 @@ class YOLODetector:
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """Run inference and return only person, car, and motorcycle detections."""
         # Optimization 3: higher confidence + capped detections reduce compute and clutter.
-        results = self.model(frame, conf=self.conf_threshold, max_det=self.max_detections, verbose=False)
+        results = self.model(
+            frame,
+            conf=self.conf_threshold,
+            max_det=self.max_detections,
+            classes=sorted(TARGET_CLASS_IDS),
+            verbose=False,
+        )
         if not results:
             return []
 

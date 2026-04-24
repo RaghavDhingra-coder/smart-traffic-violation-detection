@@ -29,11 +29,14 @@ class ObjectTracker:
         max_age: int = 30,
         n_init: int = 2,
         max_iou_distance: float = 0.7,
+        use_appearance: bool = False,
     ) -> None:
+        self.use_appearance = use_appearance
         self.tracker = DeepSort(
             max_age=max_age,
             n_init=n_init,
             max_iou_distance=max_iou_distance,
+            embedder="mobilenet" if use_appearance else None,
         )
 
     def update(self, detections: List[Detection], frame: np.ndarray) -> List[TrackedObject]:
@@ -57,7 +60,8 @@ class ObjectTracker:
         if not ds_detections:
             return []
 
-        tracks = self.tracker.update_tracks(ds_detections, frame=frame)
+        tracker_kwargs = {"frame": frame} if self.use_appearance else {}
+        tracks = self.tracker.update_tracks(ds_detections, **tracker_kwargs)
 
         tracked_objects: List[TrackedObject] = []
         for track in tracks:
