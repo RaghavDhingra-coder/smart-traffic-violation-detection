@@ -15,6 +15,8 @@ from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, norma
 from plate_detector import PlateDetector
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
+from violations.helmet import detect_no_helmet
+from violations.triple_riding import detect_triple_riding
 
 FRAME_SIZE = (416, 256)
 WINDOW_NAME = "Phase 2 - Object Detection + Tracking"
@@ -22,7 +24,10 @@ PLATE_DEBUG_WINDOW = "Plate Crop Debug"
 OCR_MIN_BBOX_AREA = 12000
 OCR_MIN_CONFIDENCE = 0.35
 OCR_ALLOWED_CLASSES = {"car", "motorcycle"}
-OCR_RETRY_INTERVAL_FRAMES = 6
+OCR_RETRY_INTERVAL_FRAMES = 18
+OCR_MAX_TRACKS_PER_FRAME = 1
+OCR_MAX_ATTEMPTS_PER_TRACK = 3
+OCR_ENABLE_FULL_FRAME_FALLBACK = False
 VEHICLE_LIKE_MIN_AREA = 30000
 VEHICLE_LIKE_MIN_ASPECT = 1.20
 OCR_CONFIRM_VOTES = 2
@@ -38,6 +43,7 @@ class AnnotatedTrackedObject:
     confidence: float
     bbox: tuple[int, int, int, int]
     plate: Optional[str] = None
+    violation: Optional[str] = None
 
 
 def crop_vehicle_from_frame(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> Optional[np.ndarray]:
@@ -128,6 +134,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print OCR pipeline decisions for each track.",
     )
+    parser.add_argument(
+        "--disable-ocr",
+        action="store_true",
+        help="Disable plate detector + OCR for higher FPS.",
+    )
     return parser.parse_args()
 
 
@@ -150,7 +161,7 @@ def main() -> None:
     try:
         detector = YOLODetector(model_path=args.model, conf_threshold=args.conf)
         tracker = ObjectTracker()
-        plate_detector = PlateDetector()
+        plate_detector = None if args.disable_ocr else PlateDetector()
     except Exception as exc:  # noqa: BLE001
         print(f"Error: Failed to initialize detector/tracker: {exc}")
         capture.release()
@@ -163,6 +174,7 @@ def main() -> None:
     plate_votes: dict[int, dict[str, int]] = {}
     # Retry OCR periodically for tracks that previously failed (avoids one-shot misses).
     last_ocr_attempt_frame: dict[int, int] = {}
+    ocr_attempt_count: dict[int, int] = {}
     # Stabilize noisy tracker metadata across frames.
     track_class_cache: dict[int, str] = {}
     track_conf_cache: dict[int, float] = {}
@@ -190,6 +202,25 @@ def main() -> None:
             detections = detector.detect(frame)
             tracked_objects = tracker.update(detections, frame)
 
+            # Phase 4: violation detection on tracked objects.
+            triple_v = detect_triple_riding(tracked_objects)
+            helmet_v = detect_no_helmet(tracked_objects)
+            all_violations = triple_v + helmet_v
+
+            # track_id -> violation text, merge multiple violations if needed.
+            violation_map: dict[int, str] = {}
+            for violation in all_violations:
+                track_id = int(violation.get("track_id", -1))
+                vtype = str(violation.get("type", "")).strip()
+                if track_id < 0 or not vtype:
+                    continue
+                if track_id in violation_map:
+                    existing = violation_map[track_id].split(", ")
+                    if vtype not in existing:
+                        violation_map[track_id] = f"{violation_map[track_id]}, {vtype}"
+                else:
+                    violation_map[track_id] = vtype
+
             # Precompute OCR-space bbox and largest track (used for full-frame fallback assignment).
             bbox_for_ocr_map: dict[int, tuple[int, int, int, int]] = {}
             bbox_area_map: dict[int, int] = {}
@@ -207,6 +238,14 @@ def main() -> None:
             full_frame_plate_attempted = False
             full_frame_plate_text: Optional[str] = None
             full_frame_plate_crop: Optional[np.ndarray] = None
+
+            # Keep OCR cost bounded: only a small number of largest tracks get OCR attempts per frame.
+            prioritized_track_ids = sorted(
+                bbox_area_map,
+                key=lambda tid: bbox_area_map.get(tid, 0),
+                reverse=True,
+            )[:OCR_MAX_TRACKS_PER_FRAME]
+            prioritized_track_set = set(prioritized_track_ids)
 
             annotated_objects: list[AnnotatedTrackedObject] = []
             for obj in tracked_objects:
@@ -226,9 +265,20 @@ def main() -> None:
                 # OCR/detection runs only for unseen plate tracks with retry backoff.
                 last_attempt = last_ocr_attempt_frame.get(obj.track_id, -OCR_RETRY_INTERVAL_FRAMES)
                 should_retry_now = (frame_count - last_attempt) >= OCR_RETRY_INTERVAL_FRAMES
+                attempts_so_far = ocr_attempt_count.get(obj.track_id, 0)
+                is_vehicle_candidate = class_name in OCR_ALLOWED_CLASSES or is_vehicle_like_bbox(obj.bbox)
+                is_prioritized = obj.track_id in prioritized_track_set
 
-                if obj.track_id not in known_plates and should_retry_now:
+                if (
+                    not args.disable_ocr
+                    and obj.track_id not in known_plates
+                    and should_retry_now
+                    and attempts_so_far < OCR_MAX_ATTEMPTS_PER_TRACK
+                    and is_vehicle_candidate
+                    and is_prioritized
+                ):
                     last_ocr_attempt_frame[obj.track_id] = frame_count
+                    ocr_attempt_count[obj.track_id] = attempts_so_far + 1
                     # Tracker bbox is on resized inference frame; remap to original frame for OCR quality.
                     bbox_for_ocr = bbox_for_ocr_map.get(obj.track_id, obj.bbox)
                     x1, y1, x2, y2 = bbox_for_ocr
@@ -239,7 +289,11 @@ def main() -> None:
                     if effective_conf >= OCR_MIN_CONFIDENCE and bbox_area >= OCR_MIN_BBOX_AREA:
                         vehicle_crop = crop_vehicle_from_frame(original_frame, bbox_for_ocr)
 
-                        plate_crop_yolo = plate_detector.detect_plate(vehicle_crop) if vehicle_crop is not None else None
+                        plate_crop_yolo = (
+                            plate_detector.detect_plate(vehicle_crop)
+                            if (plate_detector is not None and vehicle_crop is not None)
+                            else None
+                        )
                         plate_crop_fallback = crop_plate_from_vehicle(original_frame, bbox_for_ocr)
 
                         candidates: list[tuple[str, Optional[np.ndarray]]] = [
@@ -273,10 +327,14 @@ def main() -> None:
                                 break
 
                         # If local crops fail, attempt one global full-frame plate detection per frame.
-                        if not plate and obj.track_id == largest_track_id:
+                        if OCR_ENABLE_FULL_FRAME_FALLBACK and not plate and obj.track_id == largest_track_id:
                             if not full_frame_plate_attempted:
                                 full_frame_plate_attempted = True
-                                full_frame_plate_crop = plate_detector.detect_plate(original_frame)
+                                full_frame_plate_crop = (
+                                    plate_detector.detect_plate(original_frame)
+                                    if plate_detector is not None
+                                    else None
+                                )
                                 full_frame_plate_text = extract_text(full_frame_plate_crop) if full_frame_plate_crop is not None else None
 
                             if full_frame_plate_text:
@@ -342,6 +400,7 @@ def main() -> None:
                         confidence=obj.confidence,
                         bbox=obj.bbox,
                         plate=plate,
+                        violation=violation_map.get(obj.track_id),
                     )
                 )
 

@@ -56,10 +56,13 @@ def draw_detections(
             if plate_text is None:
                 # Backward compatibility with older annotated objects.
                 plate_text = getattr(detection, "plate_text", None)
+            label = f"{class_name} ID:{track_id}"
             if plate_text:
-                label = f"{class_name} ID:{track_id} {plate_text}"
-            else:
-                label = f"{class_name} ID:{track_id}"
+                label += f" {plate_text}"
+
+            violation_text = getattr(detection, "violation", None)
+            if violation_text:
+                label += f" [{violation_text}]"
         else:
             label = f"{class_name} {detection.confidence:.2f}"
 
