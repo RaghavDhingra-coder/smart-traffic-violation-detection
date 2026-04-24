@@ -12,7 +12,7 @@ import numpy as np
 
 from detector import YOLODetector
 from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, normalize_plate_text
-from plate_detector import PlateDetector
+from plate_detector import DEFAULT_PLATE_MODEL_PATH, PlateDetector
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
 from violations.helmet import detect_no_helmet
@@ -130,6 +130,11 @@ def parse_args() -> argparse.Namespace:
         help="Show cropped plate images used for OCR.",
     )
     parser.add_argument(
+        "--plate-model",
+        default=DEFAULT_PLATE_MODEL_PATH,
+        help=f"Path to YOLO plate model relative to ai-engine/ (default: {DEFAULT_PLATE_MODEL_PATH})",
+    )
+    parser.add_argument(
         "--debug-ocr",
         action="store_true",
         help="Print OCR pipeline decisions for each track.",
@@ -161,7 +166,7 @@ def main() -> None:
     try:
         detector = YOLODetector(model_path=args.model, conf_threshold=args.conf)
         tracker = ObjectTracker()
-        plate_detector = None if args.disable_ocr else PlateDetector()
+        plate_detector = None if args.disable_ocr else PlateDetector(model_path=args.plate_model)
     except Exception as exc:  # noqa: BLE001
         print(f"Error: Failed to initialize detector/tracker: {exc}")
         capture.release()

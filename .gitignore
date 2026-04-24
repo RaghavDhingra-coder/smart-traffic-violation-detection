@@ -73,6 +73,9 @@ docker-data/
 *.sqlite
 
 # AI model artifacts and outputs
+ai-engine/.ultralytics/
+ai-engine/runs/
+runs/
 ai-engine/models/*
 !ai-engine/models/.gitkeep
 *.pt

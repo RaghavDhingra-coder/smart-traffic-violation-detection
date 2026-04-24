@@ -17,13 +17,15 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_ULTRALYTICS_DIR))
 
 from ultralytics import YOLO
 
+DEFAULT_PLATE_MODEL_PATH = "models/plate/best.pt"
+
 
 class PlateDetector:
     """Detect and crop the best license plate region from a vehicle image."""
 
     def __init__(
         self,
-        model_path: str = "models/plate_model.pt",
+        model_path: str = DEFAULT_PLATE_MODEL_PATH,
         conf_threshold: float = 0.10,
     ) -> None:
         self.conf_threshold = conf_threshold
