@@ -13,6 +13,7 @@ import numpy as np
 from detector import YOLODetector
 from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, normalize_plate_text
 from plate_detector import PlateDetector
+from speed_estimator import estimate_speed
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
 from violations.helmet import detect_no_helmet
@@ -35,6 +36,7 @@ OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
 SIGNAL_STATE = "RED"  # can be RED or GREEN
 STOP_LINE_Y = 170  # horizontal line across frame
+SPEED_LIMIT = 50  # adjust experimentally
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,7 @@ def main() -> None:
 
             detections = detector.detect(frame)
             tracked_objects = tracker.update(detections, frame)
+            speed_map = estimate_speed(tracked_objects)
 
             # Phase 4: violation detection on tracked objects.
             triple_v = detect_triple_riding(tracked_objects)
@@ -217,6 +220,17 @@ def main() -> None:
             )
             all_violations = triple_v + helmet_v
             all_violations += signal_v
+            for obj in tracked_objects:
+                track_id = int(getattr(obj, "track_id", -1))
+                speed = speed_map.get(track_id)
+                if speed is None:
+                    continue
+                if speed > SPEED_LIMIT:
+                    try:
+                        object.__setattr__(obj, "violation", "OVERSPEEDING")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    all_violations.append({"track_id": track_id, "type": "OVERSPEEDING"})
 
             if signal_v:
                 total_signal_violations += len(signal_v)
