@@ -16,6 +16,7 @@ from plate_detector import PlateDetector
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
 from violations.helmet import detect_no_helmet
+from violations.signal import detect_signal_violation
 from violations.triple_riding import detect_triple_riding
 
 FRAME_SIZE = (416, 256)
@@ -32,6 +33,8 @@ VEHICLE_LIKE_MIN_AREA = 30000
 VEHICLE_LIKE_MIN_ASPECT = 1.20
 OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
+SIGNAL_STATE = "RED"  # can be RED or GREEN
+STOP_LINE_Y = 300  # horizontal line across frame
 
 
 @dataclass(frozen=True)
@@ -193,6 +196,7 @@ def main() -> None:
             # Optimization 1: smaller frame for faster inference.
             frame = cv2.resize(frame, FRAME_SIZE)
             proc_h, proc_w = frame.shape[:2]
+            effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
 
             # Optimization 2: run detector/tracker on every second frame.
             frame_count += 1
@@ -205,7 +209,24 @@ def main() -> None:
             # Phase 4: violation detection on tracked objects.
             triple_v = detect_triple_riding(tracked_objects)
             helmet_v = detect_no_helmet(tracked_objects)
+            signal_v = detect_signal_violation(
+                tracked_objects,
+                effective_stop_line_y,
+                SIGNAL_STATE,
+            )
             all_violations = triple_v + helmet_v
+            all_violations += signal_v
+
+            if signal_v:
+                print("Signal violations:", signal_v)
+
+            for v in all_violations:
+                for obj in tracked_objects:
+                    if obj.track_id == v["track_id"]:
+                        try:
+                            object.__setattr__(obj, "violation", v["type"])
+                        except Exception:  # noqa: BLE001
+                            pass
 
             # track_id -> violation text, merge multiple violations if needed.
             violation_map: dict[int, str] = {}
@@ -405,6 +426,8 @@ def main() -> None:
                 )
 
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
+            frame_width = frame.shape[1]
+            cv2.line(frame, (0, effective_stop_line_y), (frame_width, effective_stop_line_y), (0, 0, 255), 2)
 
             current_time = time.perf_counter()
             fps = 1.0 / max(current_time - prev_time, 1e-6)
