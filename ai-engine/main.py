@@ -34,7 +34,7 @@ VEHICLE_LIKE_MIN_ASPECT = 1.20
 OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
 SIGNAL_STATE = "RED"  # can be RED or GREEN
-STOP_LINE_Y = 300  # horizontal line across frame
+STOP_LINE_Y = 170  # horizontal line across frame
 
 
 @dataclass(frozen=True)
@@ -182,6 +182,7 @@ def main() -> None:
     track_class_cache: dict[int, str] = {}
     track_conf_cache: dict[int, float] = {}
     debug_state_cache: dict[int, str] = {}
+    total_signal_violations = 0
 
     try:
         while True:
@@ -218,6 +219,7 @@ def main() -> None:
             all_violations += signal_v
 
             if signal_v:
+                total_signal_violations += len(signal_v)
                 print("Signal violations:", signal_v)
 
             for v in all_violations:
@@ -428,6 +430,26 @@ def main() -> None:
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
             frame_width = frame.shape[1]
             cv2.line(frame, (0, effective_stop_line_y), (frame_width, effective_stop_line_y), (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                f"Signal: {SIGNAL_STATE}  LineY: {effective_stop_line_y}",
+                (10, 55),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255) if SIGNAL_STATE == "RED" else (0, 180, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                frame,
+                f"Signal Violations: {total_signal_violations}",
+                (10, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
             current_time = time.perf_counter()
             fps = 1.0 / max(current_time - prev_time, 1e-6)
