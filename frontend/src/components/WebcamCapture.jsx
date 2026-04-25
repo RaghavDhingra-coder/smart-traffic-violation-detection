@@ -11,8 +11,9 @@ export default function WebcamCapture({ onViolationDetected }) {
   const streamRef = useRef(null);
   const busyRef = useRef(false);
   const [loading, setLoading] = useState(false);
-  const [latestViolations, setLatestViolations] = useState([]);
+  const [latestDetections, setLatestDetections] = useState([]);
   const [error, setError] = useState("");
+  const requestCountRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -48,16 +49,38 @@ export default function WebcamCapture({ onViolationDetected }) {
             setLoading(true);
             setError("");
             const frame = canvas.toDataURL("image/jpeg", 0.8);
+            requestCountRef.current += 1;
+            console.info("[WebcamCapture] sending frame", {
+              requestNo: requestCountRef.current,
+              width: canvas.width,
+              height: canvas.height,
+              source: "webcam",
+            });
             const response = await api.post("/detect", { frame, source: "webcam" });
-            const violations = response.data.violations || [];
-            setLatestViolations(violations);
-            if (violations.length > 0 && onViolationDetected) {
+            const detections = response.data.detections || [];
+            const storedChallans = response.data.stored_challans || [];
+            console.info("[WebcamCapture] /detect response", {
+              requestNo: requestCountRef.current,
+              detectionsCount: detections.length,
+              storedChallansCount: storedChallans.length,
+              detectionsSample: detections.slice(0, 2),
+              storedChallansSample: storedChallans.slice(0, 2),
+            });
+            setLatestDetections(detections);
+            if (detections.length > 0 && onViolationDetected) {
               onViolationDetected({
-                violations,
+                detections,
+                storedChallans,
                 timestamp: new Date().toISOString(),
               });
             }
           } catch (requestError) {
+            console.error("[WebcamCapture] /detect failed", {
+              requestNo: requestCountRef.current,
+              status: requestError?.response?.status,
+              detail: requestError?.response?.data?.detail,
+              message: requestError?.message,
+            });
             setError(requestError.response?.data?.detail || "Failed to analyze webcam frame.");
           } finally {
             busyRef.current = false;
@@ -105,12 +128,12 @@ export default function WebcamCapture({ onViolationDetected }) {
       <section className="space-y-4">
         <div className="rounded-[2rem] border border-white/70 bg-white p-5 shadow-panel">
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Result Feed</p>
-          <h3 className="mt-1 font-display text-xl font-semibold text-ink">Latest Violations</h3>
+          <h3 className="mt-1 font-display text-xl font-semibold text-ink">Latest Detections</h3>
         </div>
-        {latestViolations.length > 0 ? (
-          latestViolations.map((violation, index) => (
+        {latestDetections.length > 0 ? (
+          latestDetections.map((violation, index) => (
             <ViolationCard
-              key={`${violation.type}-${index}`}
+              key={`${violation.type}-${violation.track_id ?? index}`}
               violation={{ ...violation, sourceLabel: "Webcam" }}
             />
           ))

@@ -6,6 +6,11 @@ from pydantic import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://postgres:1234@localhost:5432/traffic"
+    redis_url: str = "redis://localhost:6379/0"
+    ai_engine_url: str = "http://localhost:8001"
+    razorpay_key_id: str = "rzp_test_dummyKeyId"
+    razorpay_key_secret: str = "dummyKeySecret"
+    vaahan_api_key: str = "dummy_vaahan_api_key"
     backend_cors_origins: str = "*"
 
     class Config:

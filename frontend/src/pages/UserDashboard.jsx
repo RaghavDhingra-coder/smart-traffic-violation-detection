@@ -5,6 +5,16 @@ import api from "../api/axios";
 import ChallanCard from "../components/ChallanCard";
 import { useAuth } from "../context/AuthContext";
 
+const defaultFineByType = {
+  NO_HELMET: 500,
+  TRIPPLING: 1000,
+  TRIPLE_RIDING: 1000,
+  OVERSPEEDING: 2000,
+  TRAFFIC_LIGHT_JUMP: 1000,
+  NO_PARKING: 500,
+  NO_NUMBER_PLATE: 5000,
+};
+
 export default function UserDashboard() {
   const { vehicleNumber, challans, setChallans, loginWithVehicle, isAuthenticated } = useAuth();
   const [plateInput, setPlateInput] = useState(vehicleNumber);
@@ -25,15 +35,16 @@ export default function UserDashboard() {
   async function handlePay(challan) {
     try {
       setPayingId(challan.id);
+      const amount = challan.amount ?? defaultFineByType[(challan.violation_type || "").toUpperCase()] ?? 500;
       const response = await api.post("/payment/create-order", {
         challan_id: challan.id,
-        amount: challan.amount,
+        amount,
         currency: "INR",
       });
 
       const options = {
         key: response.data.key_id,
-        amount: challan.amount * 100,
+        amount: amount * 100,
         currency: response.data.currency || "INR",
         name: "Traffic Violation System",
         description: `Payment for challan #${challan.id}`,
@@ -45,7 +56,7 @@ export default function UserDashboard() {
             razorpay_payment_id: gatewayResponse.razorpay_payment_id,
             razorpay_signature: gatewayResponse.razorpay_signature,
           });
-          setChallans((prev) => prev.map((item) => (item.id === challan.id ? { ...item, status: "paid" } : item)));
+          setChallans((prev) => prev.map((item) => (item.id === challan.id ? { ...item, status: "PAID" } : item)));
         },
         theme: {
           color: "#0f172a",

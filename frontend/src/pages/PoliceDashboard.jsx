@@ -6,12 +6,13 @@ import WebcamCapture from "../components/WebcamCapture";
 import ViolationCard from "../components/ViolationCard";
 
 const fineMap = {
-  no_helmet: 500,
-  trippling: 1000,
-  overspeeding: 2000,
-  traffic_light_jump: 1000,
-  no_parking: 500,
-  no_number_plate: 5000,
+  NO_HELMET: 500,
+  TRIPPLING: 1000,
+  TRIPLE_RIDING: 1000,
+  OVERSPEEDING: 2000,
+  TRAFFIC_LIGHT_JUMP: 1000,
+  NO_PARKING: 500,
+  NO_NUMBER_PLATE: 5000,
 };
 
 const tabs = ["Live Detection", "Plate Lookup", "Issue Challan", "Stats"];
@@ -22,12 +23,12 @@ export default function PoliceDashboard() {
   const [lookupPlate, setLookupPlate] = useState("");
   const [lookupResult, setLookupResult] = useState(null);
   const [lookupError, setLookupError] = useState("");
-  const [challanForm, setChallanForm] = useState({ plate: "", violation_type: "no_helmet", image_path: "" });
+  const [challanForm, setChallanForm] = useState({ plate: "", violation_type: "NO_HELMET", image_url: "" });
   const [submitMessage, setSubmitMessage] = useState("");
 
   const stats = useMemo(() => {
-    const pendingPayments = liveFeed.filter((entry) => entry.violations?.some((violation) => violation.type)).length;
-    const breakdown = liveFeed.flatMap((entry) => entry.violations || []).reduce((acc, violation) => {
+    const pendingPayments = liveFeed.filter((entry) => entry.detections?.some((violation) => violation.type)).length;
+    const breakdown = liveFeed.flatMap((entry) => entry.detections || []).reduce((acc, violation) => {
       acc[violation.type] = (acc[violation.type] || 0) + 1;
       return acc;
     }, {});
@@ -43,7 +44,7 @@ export default function PoliceDashboard() {
     event.preventDefault();
     try {
       setLookupError("");
-      const response = await api.get(`/vehicle/${lookupPlate}`);
+      const response = await api.get(`/challan/${lookupPlate}`);
       setLookupResult(response.data);
     } catch (error) {
       setLookupResult(null);
@@ -54,9 +55,12 @@ export default function PoliceDashboard() {
   async function handleIssueChallan(event) {
     event.preventDefault();
     try {
-      const response = await api.post("/challan", challanForm);
+      const response = await api.post("/challan", {
+        ...challanForm,
+        timestamp: new Date().toISOString(),
+      });
       setSubmitMessage(`Challan #${response.data.id} created for ${response.data.plate}.`);
-      setChallanForm({ plate: "", violation_type: "no_helmet", image_path: "" });
+      setChallanForm({ plate: "", violation_type: "NO_HELMET", image_url: "" });
     } catch (error) {
       setSubmitMessage(error.response?.data?.detail || "Failed to create challan.");
     }
@@ -92,7 +96,7 @@ export default function PoliceDashboard() {
           <WebcamCapture onViolationDetected={(result) => setLiveFeed((prev) => [result, ...prev].slice(0, 8))} />
           <section className="grid gap-4 lg:grid-cols-2">
             {liveFeed.map((entry, entryIndex) =>
-              (entry.violations || []).map((violation, violationIndex) => (
+              (entry.detections || []).map((violation, violationIndex) => (
                 <ViolationCard
                   key={`${entry.timestamp}-${entryIndex}-${violationIndex}`}
                   violation={{
@@ -127,23 +131,17 @@ export default function PoliceDashboard() {
             {lookupResult ? (
               <div className="space-y-5">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Vehicle Details</p>
-                  <h3 className="mt-1 font-display text-2xl font-semibold text-ink">{lookupResult.vehicle.plate}</h3>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Owner</p><p className="mt-1 font-semibold text-slate-900">{lookupResult.vehicle.owner_name}</p></div>
-                  <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Vehicle Type</p><p className="mt-1 font-semibold text-slate-900">{lookupResult.vehicle.vehicle_type}</p></div>
-                  <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Contact</p><p className="mt-1 font-semibold text-slate-900">{lookupResult.vehicle.owner_contact}</p></div>
-                  <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">State</p><p className="mt-1 font-semibold text-slate-900">{lookupResult.vehicle.registration_state}</p></div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Plate</p>
+                  <h3 className="mt-1 font-display text-2xl font-semibold text-ink">{lookupPlate || "N/A"}</h3>
                 </div>
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Challan History</p>
                   <div className="mt-3 space-y-3">
-                    {lookupResult.challans.length > 0 ? lookupResult.challans.map((challan) => (
+                    {lookupResult.length > 0 ? lookupResult.map((challan) => (
                       <div key={challan.id} className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-600">
                         <p className="font-semibold capitalize text-slate-900">{challan.violation_type.replaceAll("_", " ")}</p>
                         <p>Status: {challan.status}</p>
-                        <p>Amount: ?{challan.amount}</p>
+                        <p>Time: {new Date(challan.timestamp).toLocaleString()}</p>
                       </div>
                     )) : <p className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">No challans found for this plate.</p>}
                   </div>
@@ -168,7 +166,7 @@ export default function PoliceDashboard() {
               <select value={challanForm.violation_type} onChange={(event) => setChallanForm((prev) => ({ ...prev, violation_type: event.target.value }))} className="w-full rounded-2xl border border-slate-200 px-4 py-3">
                 {Object.keys(fineMap).map((key) => <option key={key} value={key}>{key.replaceAll("_", " ")}</option>)}
               </select>
-              <input value={challanForm.image_path} onChange={(event) => setChallanForm((prev) => ({ ...prev, image_path: event.target.value }))} placeholder="Evidence image path (optional)" className="w-full rounded-2xl border border-slate-200 px-4 py-3" />
+              <input value={challanForm.image_url} onChange={(event) => setChallanForm((prev) => ({ ...prev, image_url: event.target.value }))} placeholder="Evidence image URL (optional)" className="w-full rounded-2xl border border-slate-200 px-4 py-3" />
               <div className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800">Auto-filled fine amount: <span className="font-bold">?{fineMap[challanForm.violation_type]}</span></div>
               <button type="submit" className="w-full rounded-2xl bg-ink px-5 py-3 font-semibold text-white">Create Challan</button>
               {submitMessage ? <p className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-700">{submitMessage}</p> : null}

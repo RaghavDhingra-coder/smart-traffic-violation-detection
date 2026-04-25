@@ -1,21 +1,11 @@
-# TODO for detection-service: add retries, batching, and stronger validation for AI engine responses.
-import asyncio
-import base64
-from pathlib import Path
-from typing import Optional
-
 import httpx
 
 try:
     from ..config import settings
-    from ..schemas.detection import ViolationOut
-    from ..schemas.violation import ViolationCreate
-    from .violation_service import insert_violation
+    from ..schemas.detection import DetectionItem
 except ImportError:
     from config import settings
-    from schemas.detection import ViolationOut
-    from schemas.violation import ViolationCreate
-    from services.violation_service import insert_violation
+    from schemas.detection import DetectionItem
 
 
 class DetectionServiceError(Exception):
@@ -30,10 +20,8 @@ class DetectionResponseError(DetectionServiceError):
     pass
 
 
-async def run_detection(image_path: str, source: str = "upload") -> list[ViolationOut]:
-    file_bytes = await asyncio.to_thread(Path(image_path).read_bytes)
-    encoded = base64.b64encode(file_bytes).decode("utf-8")
-    payload = {"image_base64": encoded, "source": source}
+async def run_detection(image_base64: str, source: str = "webcam") -> list[DetectionItem]:
+    payload = {"image_base64": image_base64, "source": source}
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -42,34 +30,24 @@ async def run_detection(image_path: str, source: str = "upload") -> list[Violati
     except httpx.TimeoutException as exc:
         raise DetectionUpstreamError("AI detection service timed out") from exc
     except httpx.HTTPStatusError as exc:
+        details = exc.response.text.strip()
+        suffix = f": {details}" if details else ""
         raise DetectionUpstreamError(
-            f"AI detection service returned status {exc.response.status_code}"
+            f"AI detection service returned status {exc.response.status_code}{suffix}"
         ) from exc
     except httpx.HTTPError as exc:
         raise DetectionUpstreamError("Failed to reach AI detection service") from exc
 
     try:
-        data = response.json()
+        body = response.json()
     except ValueError as exc:
         raise DetectionResponseError("AI detection service returned invalid JSON") from exc
 
-    violations = data.get("violations", [])
-    if not isinstance(violations, list):
-        raise DetectionResponseError("AI detection response has invalid violations payload")
+    detections = body.get("detections", [])
+    if not isinstance(detections, list):
+        raise DetectionResponseError("AI detection response has invalid detections payload")
 
-    return [ViolationOut(**violation) for violation in violations]
-
-
-async def store_detected_violations(
-    violations: list[ViolationOut],
-    location: Optional[str] = None,
-) -> None:
-    violation_payloads = []
-    for violation in violations:
-        payload = ViolationCreate.from_detection(violation, location=location)
-        if payload is not None:
-            violation_payloads.append(payload)
-
-    await asyncio.gather(
-        *(asyncio.to_thread(insert_violation, payload) for payload in violation_payloads)
-    )
+    try:
+        return [DetectionItem(**item) for item in detections]
+    except Exception as exc:  # noqa: BLE001
+        raise DetectionResponseError(f"AI detection response validation failed: {exc}") from exc
