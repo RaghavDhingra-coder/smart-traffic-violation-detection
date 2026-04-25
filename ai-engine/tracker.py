@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from deep_sort_realtime.deepsort_tracker import DeepSort
@@ -60,7 +60,7 @@ class ObjectTracker:
         if not ds_detections:
             return []
 
-        tracker_kwargs = {"frame": frame} if self.use_appearance else {}
+        tracker_kwargs = {"frame": frame} if self.use_appearance else {"embeds": self._build_fast_embeddings(ds_detections)}
         tracks = self.tracker.update_tracks(ds_detections, **tracker_kwargs)
 
         tracked_objects: List[TrackedObject] = []
@@ -96,3 +96,63 @@ class ObjectTracker:
             )
 
         return tracked_objects
+
+    @staticmethod
+    def _build_fast_embeddings(ds_detections: list[tuple[list[float], float, int]]) -> np.ndarray:
+        """
+        Build lightweight deterministic embeddings for no-appearance mode.
+
+        Newer deep-sort-realtime versions require either an embedder or explicit
+        embeddings. These features keep fast IoU-style behavior without loading a
+        heavy re-ID model.
+        """
+        if not ds_detections:
+            return np.zeros((0, 8), dtype=np.float32)
+
+        embeds: list[np.ndarray] = []
+        for (x, y, w, h), conf, class_id in ds_detections:
+            cx = x + (w * 0.5)
+            cy = y + (h * 0.5)
+            vec = np.array(
+                [
+                    float(cx),
+                    float(cy),
+                    float(w),
+                    float(h),
+                    float(conf),
+                    float(class_id),
+                    float(w * h),
+                    float((w + h) * 0.5),
+                ],
+                dtype=np.float32,
+            )
+            norm = float(np.linalg.norm(vec))
+            if norm > 1e-8:
+                vec = vec / norm
+            else:
+                vec = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            embeds.append(vec)
+
+        return np.vstack(embeds).astype(np.float32)
+
+
+_DEFAULT_TRACKER: Optional[ObjectTracker] = None
+
+
+def track_objects(detections: List[Detection]) -> List[TrackedObject]:
+    """
+    Required helper: track detections and return tracked objects.
+
+    Uses a lightweight synthetic frame bounds when caller does not provide a frame.
+    """
+    global _DEFAULT_TRACKER
+    if _DEFAULT_TRACKER is None:
+        _DEFAULT_TRACKER = ObjectTracker(use_appearance=False)
+
+    if not detections:
+        return []
+
+    max_x = max(det.bbox[2] for det in detections) + 8
+    max_y = max(det.bbox[3] for det in detections) + 8
+    frame = np.zeros((max(16, max_y), max(16, max_x), 3), dtype=np.uint8)
+    return _DEFAULT_TRACKER.update(detections, frame)

@@ -15,14 +15,14 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from detector import YOLODetector
+from detector import VEHICLE_CLASS_IDS, YOLODetector
 from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, normalize_plate_text
 from plate_detector import DEFAULT_PLATE_MODEL_PATH, PlateDetector
 from speed_estimator import estimate_speed
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
 from violations.helmet import DEFAULT_HELMET_MODEL_PATH, HelmetDetector, detect_no_helmet
-from violations.signal import detect_signal_violation
+from violations.signal import detect_signal_violation, get_signal_state, get_violated_ids
 from violations.triple_riding import detect_triple_riding
 
 DEFAULT_FRAME_SIZE = (352, 224)
@@ -45,6 +45,18 @@ OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
 SIGNAL_STATE = "RED"  # can be RED or GREEN
 STOP_LINE_Y = 170     # horizontal line across frame
+SIGNAL_ROI = (20, 20, 120, 160)  # x, y, w, h
+SIGNAL_RED_RATIO_THRESHOLD = 0.03
+SIGNAL_LINE_BUFFER_PX = 5
+SIGNAL_CONFIRM_FRAMES = 2
+SIGNAL_STATIONARY_MOTION_PX = 3
+SIGNAL_EVIDENCE_DIR = "violations"
+SIGNAL_JSON_LOG_PATH = "violations/violations.jsonl"
+WEBCAM_PROCESS_EVERY_N_FRAMES = 2
+VIDEO_PROCESS_EVERY_N_FRAMES = 1
+WEBCAM_MAX_DETECTIONS = 15
+VIDEO_MAX_DETECTIONS = 25
+CAMERA_FRAME_READ_TIMEOUT_SEC = 5.0
 
 # --------------------------------------------------------------------------- #
 # Speed limits — expressed in pixels/second.                                   #
@@ -138,6 +150,13 @@ def is_vehicle_like_bbox(bbox: tuple[int, int, int, int]) -> bool:
     return area >= VEHICLE_LIKE_MIN_AREA and aspect >= VEHICLE_LIKE_MIN_ASPECT
 
 
+def parse_roi_arg(text: str) -> tuple[int, int, int, int]:
+    values = [int(v.strip()) for v in text.split(",")]
+    if len(values) != 4:
+        raise ValueError("ROI must be x,y,w,h")
+    return values[0], values[1], values[2], values[3]
+
+
 _detector: Optional[YOLODetector] = None
 _tracker: Optional[ObjectTracker] = None
 _plate_detector: Optional[PlateDetector] = None
@@ -150,7 +169,11 @@ def _get_runtime_components() -> tuple[YOLODetector, ObjectTracker, PlateDetecto
     global _detector, _tracker, _plate_detector, _helmet_detector
     if _detector is None:
         # API mode needs lower confidence for small/far vehicles in browser streams.
-        _detector = YOLODetector(model_path="yolov8n.pt", conf_threshold=0.25)
+        _detector = YOLODetector(
+            model_path="yolov8n.pt",
+            conf_threshold=0.25,
+            target_class_ids=VEHICLE_CLASS_IDS,
+        )
     if _tracker is None:
         # API receives sparse frames, so confirm tracks faster and retain them longer.
         _tracker = ObjectTracker(
@@ -214,6 +237,7 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
     frame = cv2.resize(original_frame, target_size)
     proc_h, proc_w = frame.shape[:2]
     effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
+    signal_state = get_signal_state(frame, SIGNAL_ROI, red_ratio_threshold=SIGNAL_RED_RATIO_THRESHOLD)
 
     detections = detector.detect(frame)
     tracked_objects = tracker.update(detections, frame)
@@ -231,7 +255,16 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
 
     triple_v = detect_triple_riding(tracked_objects)
     helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
-    signal_v = detect_signal_violation(tracked_objects, effective_stop_line_y, SIGNAL_STATE)
+    signal_v = detect_signal_violation(
+        tracked_objects,
+        effective_stop_line_y,
+        signal_state,
+        frame=frame,
+        line_buffer=SIGNAL_LINE_BUFFER_PX,
+        confirmation_frames=SIGNAL_CONFIRM_FRAMES,
+        stationary_motion_px=SIGNAL_STATIONARY_MOTION_PX,
+        save_evidence=False,
+    )
     all_violations = triple_v + helmet_v + signal_v
 
     overspeed_tracks = []
@@ -382,6 +415,84 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use DeepSORT appearance embeddings for more stable IDs at the cost of lower FPS.",
     )
+    parser.add_argument(
+        "--signal-roi",
+        default=f"{SIGNAL_ROI[0]},{SIGNAL_ROI[1]},{SIGNAL_ROI[2]},{SIGNAL_ROI[3]}",
+        help="Traffic signal ROI as x,y,w,h for HSV state detection.",
+    )
+    parser.add_argument(
+        "--signal-red-ratio",
+        type=float,
+        default=SIGNAL_RED_RATIO_THRESHOLD,
+        help="Minimum red pixel ratio in ROI to classify light as RED.",
+    )
+    parser.add_argument(
+        "--signal-state",
+        default="",
+        help="Optional fixed signal state override: RED or GREEN. Leave empty for HSV ROI mode.",
+    )
+    parser.add_argument(
+        "--stop-line-y",
+        type=int,
+        default=STOP_LINE_Y,
+        help=f"Stop-line Y position in processing frame (default: {STOP_LINE_Y}).",
+    )
+    parser.add_argument(
+        "--signal-line-buffer",
+        type=int,
+        default=SIGNAL_LINE_BUFFER_PX,
+        help="Buffer zone around stop-line in pixels.",
+    )
+    parser.add_argument(
+        "--signal-crossing-direction",
+        default="down",
+        choices=["down", "up", "both"],
+        help="Crossing direction for violation logic: down, up, both.",
+    )
+    parser.add_argument(
+        "--signal-crossing-point",
+        default="centroid",
+        choices=["centroid", "bottom"],
+        help="Reference point for stop-line crossing: centroid or bottom of bbox.",
+    )
+    parser.add_argument(
+        "--signal-allow-start-below",
+        action="store_true",
+        help="Treat tracks first seen beyond stop-line during RED as violations (fallback mode).",
+    )
+    parser.add_argument(
+        "--signal-start-below-frames",
+        type=int,
+        default=2,
+        help="Frames to confirm fallback start-below condition.",
+    )
+    parser.add_argument(
+        "--signal-confirm-frames",
+        type=int,
+        default=SIGNAL_CONFIRM_FRAMES,
+        help="Frames needed to confirm a red-light violation.",
+    )
+    parser.add_argument(
+        "--signal-stationary-px",
+        type=int,
+        default=SIGNAL_STATIONARY_MOTION_PX,
+        help="Ignore near-stationary tracks under this motion threshold.",
+    )
+    parser.add_argument(
+        "--signal-evidence-dir",
+        default=SIGNAL_EVIDENCE_DIR,
+        help="Folder to save red-light violation evidence frames.",
+    )
+    parser.add_argument(
+        "--signal-json-log",
+        default=SIGNAL_JSON_LOG_PATH,
+        help="JSONL log path for red-light violation events.",
+    )
+    parser.add_argument(
+        "--print-detections",
+        action="store_true",
+        help="Print live vehicle tracking + violation events to terminal.",
+    )
     return parser.parse_args()
 
 
@@ -496,6 +607,18 @@ def main() -> None:
 
     ocr_enabled = is_ocr_enabled(args)
     tracking_enabled = is_tracking_enabled(args)
+    try:
+        signal_roi = parse_roi_arg(args.signal_roi)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: Invalid --signal-roi value: {exc}")
+        capture.release()
+        return
+    signal_red_ratio = max(0.001, min(0.5, float(args.signal_red_ratio)))
+    fixed_signal_state = str(args.signal_state).strip().upper() if args.signal_state else ""
+    if fixed_signal_state not in {"", "RED", "GREEN"}:
+        print("Error: --signal-state must be RED, GREEN, or empty.")
+        capture.release()
+        return
 
     if args.source.isdigit() and not ocr_enabled:
         print("Info: Webcam fast mode enabled. OCR is off by default to keep the live preview responsive.")
@@ -509,7 +632,12 @@ def main() -> None:
 
     try:
         frame_size, process_every_n_frames, ocr_retry_interval_frames, max_detections = get_runtime_settings(args.source)
-        detector = YOLODetector(model_path=args.model, conf_threshold=args.conf, max_detections=max_detections)
+        detector = YOLODetector(
+            model_path=args.model,
+            conf_threshold=args.conf,
+            max_detections=max_detections,
+            target_class_ids=VEHICLE_CLASS_IDS,
+        )
         tracker = ObjectTracker(use_appearance=args.accurate_tracking) if tracking_enabled else None
         plate_detector = None if not ocr_enabled else PlateDetector(model_path=args.plate_model)
         helmet_detector = HelmetDetector(model_path=args.helmet_model)
@@ -535,6 +663,7 @@ def main() -> None:
     track_conf_cache: dict[int, float] = {}
     debug_state_cache: dict[int, str] = {}
     total_signal_violations = 0
+    last_signal_state = "GREEN"
 
     try:
         while True:
@@ -551,9 +680,9 @@ def main() -> None:
             original_frame = frame
             orig_h, orig_w = original_frame.shape[:2]
 
-            frame = cv2.resize(frame, FRAME_SIZE)
+            frame = cv2.resize(frame, frame_size)
             proc_h, proc_w = frame.shape[:2]
-            effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
+            effective_stop_line_y = max(0, min(int(args.stop_line_y), proc_h - 1))
 
             # Run detector/tracker on every second frame for performance.
             frame_count += 1
@@ -614,6 +743,12 @@ def main() -> None:
                 continue
 
             tracked_objects = tracker.update(detections, frame)
+            signal_state = (
+                fixed_signal_state
+                if fixed_signal_state in {"RED", "GREEN"}
+                else get_signal_state(frame, signal_roi, red_ratio_threshold=signal_red_ratio)
+            )
+            last_signal_state = signal_state
 
             # ---------------------------------------------------------------- #
             # FIX: build active ID set BEFORE calling estimate_speed so stale  #
@@ -636,8 +771,34 @@ def main() -> None:
             signal_v = detect_signal_violation(
                 tracked_objects,
                 effective_stop_line_y,
-                SIGNAL_STATE,
+                signal_state,
+                frame=frame,
+                line_buffer=int(args.signal_line_buffer),
+                crossing_direction=args.signal_crossing_direction,
+                crossing_point=args.signal_crossing_point,
+                allow_start_below=args.signal_allow_start_below,
+                start_below_confirm_frames=int(args.signal_start_below_frames),
+                confirmation_frames=int(args.signal_confirm_frames),
+                stationary_motion_px=int(args.signal_stationary_px),
+                save_evidence=True,
+                evidence_dir=args.signal_evidence_dir,
+                json_log_path=args.signal_json_log,
             )
+            if args.print_detections and tracked_objects:
+                track_summary = ", ".join(
+                    [
+                        (
+                            f"id={int(getattr(obj, 'track_id', -1))}"
+                            f" cls={detector.class_names.get(int(getattr(obj, 'class_id', -1)), str(getattr(obj, 'class_id', -1)))}"
+                            f" conf={float(getattr(obj, 'confidence', 0.0)):.2f}"
+                        )
+                        for obj in tracked_objects
+                    ]
+                )
+                print(
+                    f"[TRACK] frame={frame_count} signal={signal_state} "
+                    f"tracks={len(tracked_objects)} -> {track_summary}"
+                )
             all_violations = triple_v + helmet_v + signal_v
 
             for obj in tracked_objects:
@@ -657,6 +818,14 @@ def main() -> None:
             if signal_v:
                 total_signal_violations += len(signal_v)
                 print("Signal violations:", signal_v)
+                for event in signal_v:
+                    print(
+                        "[RED_LIGHT] "
+                        f"track_id={event.get('track_id')} "
+                        f"type={event.get('type')} "
+                        f"timestamp={event.get('timestamp', 'NA')} "
+                        f"evidence={event.get('evidence_path', 'NA')}"
+                    )
 
             for v in all_violations:
                 for obj in tracked_objects:
@@ -869,13 +1038,38 @@ def main() -> None:
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
             frame_width = frame.shape[1]
             cv2.line(frame, (0, effective_stop_line_y), (frame_width, effective_stop_line_y), (0, 0, 255), 2)
+            cv2.line(
+                frame,
+                (0, effective_stop_line_y - int(args.signal_line_buffer)),
+                (frame_width, effective_stop_line_y - int(args.signal_line_buffer)),
+                (0, 165, 255),
+                1,
+            )
+            cv2.line(
+                frame,
+                (0, effective_stop_line_y + int(args.signal_line_buffer)),
+                (frame_width, effective_stop_line_y + int(args.signal_line_buffer)),
+                (0, 165, 255),
+                1,
+            )
+            rx, ry, rw, rh = signal_roi
+            cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 255, 255), 1)
+
+            violated_ids = get_violated_ids()
+            for obj in tracked_objects:
+                x1, y1, x2, y2 = obj.bbox
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                centroid_color = (0, 0, 255) if obj.track_id in violated_ids else (255, 255, 0)
+                cv2.circle(frame, (cx, cy), 3, centroid_color, -1)
+
             cv2.putText(
                 frame,
-                f"Signal: {SIGNAL_STATE}  LineY: {effective_stop_line_y}",
+                f"Signal: {last_signal_state}  LineY: {effective_stop_line_y}",
                 (10, 55),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                (0, 0, 255) if SIGNAL_STATE == "RED" else (0, 180, 0),
+                (0, 0, 255) if last_signal_state == "RED" else (0, 180, 0),
                 2,
                 cv2.LINE_AA,
             )
