@@ -1,198 +1,110 @@
-# Traffic Violation Detection System
+# Smart Traffic Violation Detection
 
-A hackathon-ready scaffold for a traffic violation detection platform with:
+Traffic violation detection system with:
 
 - React + Vite frontend
 - FastAPI backend
-- FastAPI-based AI engine
+- FastAPI AI engine
 - PostgreSQL
 - Redis
-- Nginx reverse proxy
-- Docker Compose support
 
-This scaffold is designed so each team member can immediately start working in their own module with minimal setup friction.
+The current codebase is best run in this mode:
 
-## AI Engine Progress (Completed Till Phase 3)
+- PostgreSQL and Redis in Docker
+- Backend locally on port `8000`
+- AI engine locally on port `8001`
+- Frontend locally on port `3000`
 
-### Phase 1: Vehicle Detection
+## Current Features
 
-- YOLOv8 vehicle/person detection is integrated in `ai-engine/detector.py`
-- Real-time frame loop runs in `ai-engine/main.py`
-
-### Phase 2: Object Tracking
-
-- DeepSORT tracking with persistent `track_id` is integrated in `ai-engine/tracker.py`
-- Bounding boxes + IDs render in `ai-engine/utils.py`
-
-### Phase 3: Number Plate Detection + OCR
-
-- Plate detection model integration in `ai-engine/plate_detector.py`
-- OCR pipeline in `ai-engine/ocr.py` with:
-  - preprocessing variants
-  - text cleaning and normalization
-  - plate plausibility filtering
-- Main pipeline in `ai-engine/main.py` now supports:
-  - vehicle -> track -> plate detect -> OCR -> plate attach
-  - per-track caching
-  - retry logic
-  - OCR vote confirmation
-  - debug windows/logs for diagnosis
-
-Final live pipeline:
-
-```text
-Frame
-  -> Vehicle Detection (YOLOv8)
-  -> DeepSORT Tracking
-  -> Vehicle Crop
-  -> Plate Detection (YOLO plate model + fallback)
-  -> OCR (EasyOCR)
-  -> Plate text attach to track_id
-  -> Render labels
-```
+- Vehicle detection with YOLOv8
+- Object tracking with DeepSORT
+- Number plate detection with YOLO + fallback heuristics
+- OCR with EasyOCR
+- Helmet violation detection using `helmet_best.pt` with safe fallback
+- Triple riding detection
+- Signal violation detection
+- No parking detection
+- Overspeeding estimation
+- Challan creation flow in backend
 
 ## Project Structure
 
 ```text
-traffic-violation-system/
-├── docker-compose.yml
-├── nginx/
-├── frontend/
+smart-traffic-violation-detection/
+├── ai-engine/
 ├── backend/
-└── ai-engine/
+├── frontend/
+├── nginx/
+├── docker-compose.yml
+└── README.md
 ```
 
-## Setup Strategy
+## Ports
 
-For this project, PostgreSQL and Redis will run using Docker only.
-
-You can use the project in either of these ways:
-
-1. Full Docker setup:
-   Run frontend, backend, AI engine, PostgreSQL, Redis, and Nginx with Docker Compose.
-
-2. Hybrid local development:
-   Run only PostgreSQL and Redis in Docker, and run frontend, backend, and AI engine locally from your machine.
-
-The hybrid setup is often better during development because:
-
-- database and cache setup stay consistent across all teammates
-- frontend/backend code changes reflect faster locally
-- you avoid rebuilding containers for every small code change
+- Frontend: `3000`
+- Backend: `8000`
+- AI engine: `8001`
+- PostgreSQL: `5432`
+- Redis: `6379`
 
 ## Prerequisites
 
-Install these first:
-
 - Docker Desktop
 - Node.js 20+
-- Python 3.11+
+- Python 3.11 recommended
 - `pip`
-
-Optional but recommended:
-
-- PostgreSQL client tools
-- Redis GUI or CLI tools
 
 ## Environment Setup
 
-1. Copy the example environment file:
+Copy the example env file:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-2. Review the values inside `.env`.
-
-Default scaffold values are already suitable for local development.
-
-Important variables:
-
-- `DATABASE_URL=postgresql+psycopg2://postgres:1234@postgres:5432/traffic`
-- `REDIS_URL=redis://redis:6379/0`
-- `AI_ENGINE_URL=http://ai-engine:8001`
-- `VITE_API_BASE_URL=/api`
-
-If you run backend and AI engine locally instead of via Docker, you will usually want to change:
-
-- `DATABASE_URL` host from `postgres` to `localhost`
-- `REDIS_URL` host from `redis` to `localhost`
-- `AI_ENGINE_URL` host from `ai-engine` to `http://localhost:8001`
-
-Example local-development values:
+For local development, update `.env` so backend can reach local services:
 
 ```env
+POSTGRES_DB=traffic
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=1234
+
 DATABASE_URL=postgresql+psycopg2://postgres:1234@localhost:5432/traffic
 REDIS_URL=redis://localhost:6379/0
+
+RAZORPAY_KEY_ID=rzp_test_dummyKeyId
+RAZORPAY_KEY_SECRET=dummyKeySecret
+VAAHAN_API_KEY=dummy_vaahan_api_key
+
 AI_ENGINE_URL=http://localhost:8001
-VITE_API_BASE_URL=http://localhost:8000
+
+BACKEND_CORS_ORIGINS=*
+AI_ENGINE_CORS_ORIGINS=*
+
+VITE_API_BASE_URL=/api
 ```
 
-## Option 1: Full Docker Setup
+Notes:
 
-This runs the entire stack in containers.
+- `frontend/vite.config.js` already proxies `/api` to `http://localhost:8000`
+- If backend runs in Docker instead of locally, `AI_ENGINE_URL` should not use `localhost` unless AI engine is reachable from that container
 
-### Start Everything
+## Recommended Local Setup
 
-```bash
-docker-compose up --build
-```
-
-### Access URLs
-
-- App via Nginx: `http://localhost`
-- Frontend dev server: `http://localhost:3000`
-- Backend API: `http://localhost:8000`
-- AI engine: `http://localhost:8001`
-
-### Stop Everything
-
-```bash
-docker-compose down
-```
-
-To remove volumes too:
-
-```bash
-docker-compose down -v
-```
-
-## Option 2: Run PostgreSQL and Redis in Docker Only
-
-This is the setup you requested for day-to-day development.
-
-### Step 1: Start PostgreSQL and Redis with Docker
+### 1. Start PostgreSQL and Redis
 
 ```bash
 docker-compose up -d postgres redis
 ```
 
-Verify they are running:
+Verify:
 
 ```bash
 docker-compose ps
 ```
 
-### Step 2: Update `.env` for Local App Execution
-
-Use local hostnames for services your machine will call directly:
-
-```env
-DATABASE_URL=postgresql+psycopg2://postgres:1234@localhost:5432/traffic
-REDIS_URL=redis://localhost:6379/0
-AI_ENGINE_URL=http://localhost:8001
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-### Step 3: Run the Backend Locally
-
-Open a terminal in `backend/`:
+### 2. Start the Backend
 
 ```bash
 cd backend
@@ -200,16 +112,19 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-On Windows, if `uvicorn` is not directly available:
+Health check:
 
 ```bash
-py -m pip install -r requirements.txt
-py -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+curl http://localhost:8000/health
 ```
 
-### Step 4: Run the AI Engine Locally
+Expected:
 
-Open a second terminal in `ai-engine/`:
+```json
+{"status":"ok"}
+```
+
+### 3. Start the AI Engine
 
 ```bash
 cd ai-engine
@@ -217,16 +132,19 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8001
 ```
 
-On Windows:
+Health check:
 
 ```bash
-py -m pip install -r requirements.txt
-py -m uvicorn main:app --reload --host 0.0.0.0 --port 8001
+curl http://localhost:8001/health
 ```
 
-### Step 5: Run the Frontend Locally
+Expected:
 
-Open a third terminal in `frontend/`:
+```json
+{"status":"ok"}
+```
+
+### 4. Start the Frontend
 
 ```bash
 cd frontend
@@ -234,217 +152,159 @@ npm install
 npm run dev
 ```
 
-Then open:
+Open:
 
-- Frontend: `http://localhost:3000`
+- Frontend: [http://localhost:3000](http://localhost:3000)
 
-## Database Notes
+## Model Files
 
-PostgreSQL is provisioned by Docker Compose with:
+Place model files inside `ai-engine/`.
 
-- database: `traffic`
-- username: `postgres`
-- password: `1234`
-- port: `5432`
-
-Data is persisted in the Docker volume:
-
-- `postgres_data`
-
-## Redis Notes
-
-Redis is provisioned by Docker Compose with:
-
-- port: `6379`
-- volume: `redis_data`
-
-The backend currently uses Redis for vehicle lookup caching.
-
-## Backend Migration Notes
-
-The scaffold includes Alembic files and an initial migration:
-
-- [backend/alembic/env.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\alembic\env.py)
-- [backend/alembic/versions/001_initial.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\alembic\versions\001_initial.py)
-
-If you want to run migrations manually:
-
-```bash
-cd backend
-alembic upgrade head
-```
-
-On Windows:
-
-```bash
-cd backend
-py -m alembic upgrade head
-```
-
-Note:
-
-- the current backend also calls `Base.metadata.create_all(bind=engine)` on startup
-- for a real project, the team should eventually rely on Alembic migrations consistently
-
-## How To Add The Trained YOLOv8 Model
-
-Place model files inside `ai-engine/` as follows:
+### Required / Supported Paths
 
 - Vehicle detector:
-  - `ai-engine/yolov8n.pt` (or pass a custom model with `--model`)
-- Plate detector (Phase 3):
-  - `ai-engine/models/plate_model.pt`
+  - `ai-engine/yolov8n.pt`
+  - or pass a custom model with `--model`
+- Plate detector:
   - `ai-engine/models/plate/best.pt`
+  - older fallback path still referenced in some docs: `ai-engine/models/plate_model.pt`
+- Helmet detector:
+  - `ai-engine/helmet_best.pt`
 
-Expected structure:
+Suggested structure:
 
 ```text
 ai-engine/
-  ├── yolov8n.pt
-  └── models/
-      └── plate_model.pt
-      └── plate/
-          └── best.pt
+├── yolov8n.pt
+├── helmet_best.pt
+└── models/
+    └── plate/
+        └── best.pt
 ```
 
 Notes:
 
-- If `models/plate_model.pt` is missing, plate YOLO falls back to heuristic plate localization.
-- If `models/plate/best.pt` is missing, plate YOLO falls back to heuristic plate localization.
-- If you are running in Docker and add/replace model files, rebuild/restart the AI service.
+- If the plate model is missing, plate detection falls back to heuristics
+- If `helmet_best.pt` is missing or fails to load, helmet detection falls back to the older placeholder logic instead of crashing
 
-If you are running the AI engine in Docker and add a new model, restart that service:
+## Running the AI Engine Manually
 
-```bash
-docker-compose up --build ai-engine
-```
+### API Mode
 
-If you are running the AI engine locally, just restart the local process.
+The frontend uses the AI engine through backend -> AI engine:
 
-## Run AI Engine (Phase 3 CV Pipeline)
+- Frontend sends frames to backend `/detect`
+- Backend calls AI engine `/run`
 
-From `ai-engine/`:
+### Webcam / Local Video Mode
 
-```bash
-python main.py
-```
-
-Useful debug modes:
+You can also run the AI engine directly:
 
 ```bash
-# Show plate crops used by OCR
-python main.py --debug-plate
-
-# Print OCR pipeline decision logs (skip reason / success)
-python main.py --debug-ocr
-
-# Enable both
-python main.py --debug-plate --debug-ocr
-
-# Use a different plate model
-python main.py --plate-model models/plate/best.pt
+cd ai-engine
+python3 main.py --source 0 --enable-tracking
 ```
 
-Debug log meanings:
+Useful flags:
 
-- `ocr_ok`: plate confirmed and attached to track
-- `ocr_candidate(1/2)`: one valid hit seen; waiting for confirmation vote
-- `ocr_empty`: OCR attempt ran but returned no valid plate-like text
-- `low_conf(...)`: object confidence below OCR trigger threshold
-- `small_bbox(...)`: object area too small for reliable OCR
+```bash
+python3 main.py --source 0 --enable-tracking --enable-ocr
+python3 main.py --source 0 --enable-tracking --accurate-tracking
+python3 main.py --source 0 --enable-tracking --helmet-model helmet_best.pt
+python3 main.py --source path/to/video.mp4
+```
 
-## API Endpoints
+Notes:
 
-### Backend
+- Webcam mode defaults to lighter processing for better FPS
+- OCR is off by default in webcam mode unless `--enable-ocr` is provided
+- Tracking is off by default in webcam mode unless `--enable-tracking` is provided
 
-- `GET /` - backend root
-- `GET /health` - backend health check
-- `POST /detect` - detect violations from a base64 webcam frame
-- `POST /detect/upload` - detect violations from uploaded image or video
-- `GET /challan/{plate}` - fetch challans for a vehicle plate
-- `POST /challan` - create a challan
-- `PATCH /challan/{id}/status` - update challan status
-- `GET /vehicle/{plate}` - fetch vehicle details with challan history
-- `POST /payment/create-order` - create Razorpay order stub
-- `POST /payment/verify` - verify Razorpay payment stub
+## Backend Detection Flow
 
-### AI Engine
+Current live flow:
 
-- `GET /` - AI engine root
-- `GET /health` - AI engine health check
-- `POST /run` - run violation detection on a base64 image
+```text
+Frontend Webcam
+  -> POST /api/detect
+  -> Backend /detect
+  -> AI Engine /run
+  -> YOLO detection
+  -> DeepSORT tracking
+  -> violation checks
+  -> OCR / plate extraction
+  -> backend challan creation
+```
 
-## Suggested Team Module Ownership
+## Troubleshooting
 
-### Frontend team
+### Frontend shows `503 Failed to reach AI detection service`
 
-Focus on:
+This means:
 
-- [frontend/src/pages/PoliceDashboard.jsx](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\frontend\src\pages\PoliceDashboard.jsx)
-- [frontend/src/pages/UserDashboard.jsx](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\frontend\src\pages\UserDashboard.jsx)
-- [frontend/src/pages/AwareUserDashboard.jsx](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\frontend\src\pages\AwareUserDashboard.jsx)
-- [frontend/src/components](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\frontend\src\components)
-- [frontend/src/context/AuthContext.jsx](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\frontend\src\context\AuthContext.jsx)
+- frontend can reach backend
+- backend cannot reach AI engine
 
-### Backend API team
+Check:
 
-Focus on:
+```bash
+curl http://localhost:8001/health
+```
 
-- [backend/main.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\main.py)
-- [backend/routers](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\routers)
-- [backend/services](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\services)
-- [backend/schemas](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\schemas)
+If it fails:
 
-### Database team
+- start or restart the AI engine
+- verify `.env` has `AI_ENGINE_URL=http://localhost:8001`
 
-Focus on:
+### Frontend shows `500 AI engine failed`
 
-- [backend/models](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\models)
-- [backend/database.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\database.py)
-- [backend/alembic](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\backend\alembic)
+This means backend reached AI engine, but AI engine crashed while processing a frame.
 
-### AI/CV team
+Check the AI engine terminal logs first.
 
-Focus on:
+### AI engine not using helmet model
 
-- [ai-engine/main.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\ai-engine\main.py)
-- [ai-engine/detector.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\ai-engine\detector.py)
-- [ai-engine/ocr.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\ai-engine\ocr.py)
-- [ai-engine/speed_estimator.py](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\ai-engine\speed_estimator.py)
+Make sure this file exists:
 
-### DevOps and integration team
+```text
+ai-engine/helmet_best.pt
+```
 
-Focus on:
+### Plate model not found
 
-- [docker-compose.yml](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\docker-compose.yml)
-- [nginx/nginx.conf](c:\Users\HP\OneDrive\Desktop\smart-traffic-detection\traffic-violation-system\nginx\nginx.conf)
-- frontend/backend/ai-engine Dockerfiles
+Make sure this file exists:
 
-## Important Development Notes
+```text
+ai-engine/models/plate/best.pt
+```
 
-- All placeholder logic is marked with `STUB` comments.
-- Both FastAPI apps currently allow all origins for CORS to keep hackathon setup simple.
-- Uploaded evidence files are stored in `backend/uploads/`.
-- Razorpay integration is currently a stub and not production-ready.
-- Vehicle lookup is currently mocked and cached in Redis.
-- AI detections are scaffolded with placeholder logic until the real trained model is integrated.
+## Docker Notes
 
-## Recommended Daily Workflow
+The current `docker-compose.yml` only starts:
 
-For your team, the simplest workflow is:
+- PostgreSQL
+- Redis
 
-1. Start PostgreSQL and Redis:
+Start them with:
 
 ```bash
 docker-compose up -d postgres redis
 ```
 
-2. Run backend locally
-3. Run AI engine locally
-4. Run frontend locally
+Stop them with:
 
-That gives you:
+```bash
+docker-compose down
+```
 
-- consistent shared DB and cache services via Docker
-- faster local coding and debugging
-- less rebuild overhead during the hackathon
+## API Health Endpoints
+
+- Backend root: [http://localhost:8000/](http://localhost:8000/)
+- Backend health: [http://localhost:8000/health](http://localhost:8000/health)
+- AI engine root: [http://localhost:8001/](http://localhost:8001/)
+- AI engine health: [http://localhost:8001/health](http://localhost:8001/health)
+
+## Current Limitation
+
+- The repo still contains `nginx/` and Dockerfiles, but the current active setup in code and compose is local app processes plus Dockerized Postgres/Redis.
+- If you later want, the README can be expanded again for a full containerized deployment path after the compose stack is updated to match the current code.
