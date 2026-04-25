@@ -4,23 +4,32 @@ from __future__ import annotations
 
 import argparse
 import platform
+import base64
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import cv2
 import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from detector import YOLODetector
 from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, normalize_plate_text
-from plate_detector import PlateDetector
+from plate_detector import DEFAULT_PLATE_MODEL_PATH, PlateDetector
+from speed_estimator import estimate_speed
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
-from violations.helmet import detect_no_helmet
+from violations.helmet import DEFAULT_HELMET_MODEL_PATH, HelmetDetector, detect_no_helmet
+from violations.no_parking import detect_no_parking
+from violations.signal import detect_signal_violation
 from violations.triple_riding import detect_triple_riding
 
 DEFAULT_FRAME_SIZE = (352, 224)
 WEBCAM_FRAME_SIZE = (224, 128)
+FRAME_SIZE = (416, 256)
+API_FRAME_SIZE = (640, 384)
 WINDOW_NAME = "Phase 2 - Object Detection + Tracking"
 PLATE_DEBUG_WINDOW = "Plate Crop Debug"
 OCR_MIN_BBOX_AREA = 12000
@@ -35,11 +44,28 @@ VEHICLE_LIKE_MIN_AREA = 30000
 VEHICLE_LIKE_MIN_ASPECT = 1.20
 OCR_CONFIRM_VOTES = 2
 OCR_FULL_FRAME_VOTE_WEIGHT = 2
-CAMERA_FRAME_READ_TIMEOUT_SEC = 5.0
-VIDEO_PROCESS_EVERY_N_FRAMES = 3
-WEBCAM_PROCESS_EVERY_N_FRAMES = 4
-VIDEO_MAX_DETECTIONS = 20
-WEBCAM_MAX_DETECTIONS = 8
+SIGNAL_STATE = "RED"  # can be RED or GREEN
+STOP_LINE_Y = 170     # horizontal line across frame
+
+# --------------------------------------------------------------------------- #
+# Speed limits — expressed in pixels/second.                                   #
+# Calibrate by logging raw speed values for a vehicle moving at a known speed. #
+# A car moving at walking pace (~5 km/h) typically produces 40–80 px/s        #
+# on a standard 416×256 inference frame.  Adjust to your scene.               #
+# --------------------------------------------------------------------------- #
+SPEED_LIMIT: float = 150.0      # px/s for local webcam / video file mode
+API_SPEED_LIMIT: float = 80.0   # px/s for browser-streamed API frames
+
+NO_PARKING_ZONE = (200, 200, 600, 500)  # (x1, y1, x2, y2)
+API_TRACK_STALE_SECONDS = 2.5
+
+app = FastAPI(title="Smart Traffic AI Engine", version="1.0.0")
+logger = logging.getLogger("ai-engine")
+
+
+class RunRequest(BaseModel):
+    image_base64: str
+    source: str = "webcam"
 
 
 @dataclass(frozen=True)
@@ -114,6 +140,183 @@ def is_vehicle_like_bbox(bbox: tuple[int, int, int, int]) -> bool:
     return area >= VEHICLE_LIKE_MIN_AREA and aspect >= VEHICLE_LIKE_MIN_ASPECT
 
 
+_detector: Optional[YOLODetector] = None
+_tracker: Optional[ObjectTracker] = None
+_plate_detector: Optional[PlateDetector] = None
+_helmet_detector: Optional[HelmetDetector] = None
+_api_track_violation_cache: dict[int, set[str]] = {}
+_api_track_last_seen: dict[int, float] = {}
+
+
+def _get_runtime_components() -> tuple[YOLODetector, ObjectTracker, PlateDetector, HelmetDetector]:
+    global _detector, _tracker, _plate_detector, _helmet_detector
+    if _detector is None:
+        # API mode needs lower confidence for small/far vehicles in browser streams.
+        _detector = YOLODetector(model_path="yolov8n.pt", conf_threshold=0.25)
+    if _tracker is None:
+        # API receives sparse frames, so confirm tracks faster and retain them longer.
+        _tracker = ObjectTracker(max_age=60, n_init=1, max_iou_distance=0.8)
+    if _plate_detector is None:
+        _plate_detector = PlateDetector()
+    if _helmet_detector is None:
+        _helmet_detector = HelmetDetector(model_path=DEFAULT_HELMET_MODEL_PATH)
+    return _detector, _tracker, _plate_detector, _helmet_detector
+
+
+def _decode_base64_image(image_base64: str) -> np.ndarray:
+    encoded = image_base64.split(",")[-1].strip().replace("\n", "").replace("\r", "")
+    if len(encoded) % 4:
+        encoded += "=" * (4 - (len(encoded) % 4))
+    try:
+        image_bytes = base64.b64decode(encoded)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid base64 image payload") from exc
+
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Unable to decode image")
+    return frame
+
+
+def _extract_plate_from_crop(
+    original_frame: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    plate_detector: PlateDetector,
+) -> Optional[str]:
+    vehicle_crop = crop_vehicle_from_frame(original_frame, bbox)
+    if vehicle_crop is None:
+        return None
+
+    plate_crop_yolo = plate_detector.detect_plate(vehicle_crop)
+    plate_crop_fallback = crop_plate_from_vehicle(original_frame, bbox)
+    for candidate in (plate_crop_yolo, plate_crop_fallback):
+        if candidate is None or candidate.size == 0:
+            continue
+        text = extract_text(candidate)
+        if text:
+            plate = normalize_plate_text(text)
+            if is_plausible_plate(plate):
+                return plate
+    return None
+
+
+def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dict:
+    detector, tracker, plate_detector, helmet_detector = _get_runtime_components()
+
+    original_frame = _decode_base64_image(image_base64)
+    orig_h, orig_w = original_frame.shape[:2]
+
+    target_size = API_FRAME_SIZE if source == "webcam" else FRAME_SIZE
+    frame = cv2.resize(original_frame, target_size)
+    proc_h, proc_w = frame.shape[:2]
+    effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
+
+    detections = detector.detect(frame)
+    tracked_objects = tracker.update(detections, frame)
+
+    # ------------------------------------------------------------------ #
+    # FIX: compute active track ID set and pass it to estimate_speed so   #
+    # stale entries are pruned and only current-frame speeds are returned. #
+    # ------------------------------------------------------------------ #
+    active_track_ids = {
+        int(getattr(obj, "track_id", -1))
+        for obj in tracked_objects
+        if int(getattr(obj, "track_id", -1)) >= 0
+    }
+    speed_map = estimate_speed(tracked_objects, active_track_ids=active_track_ids)
+
+    triple_v = detect_triple_riding(tracked_objects)
+    helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
+    signal_v = detect_signal_violation(tracked_objects, effective_stop_line_y, SIGNAL_STATE)
+    no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
+    all_violations = triple_v + helmet_v + signal_v + no_parking_v
+
+    overspeed_tracks = []
+    speed_samples = []
+    effective_speed_limit = API_SPEED_LIMIT if source == "webcam" else SPEED_LIMIT
+
+    for obj in tracked_objects:
+        track_id = int(getattr(obj, "track_id", -1))
+        speed = speed_map.get(track_id)
+        if speed is None:
+            continue
+        speed_samples.append({"track_id": track_id, "speed": round(float(speed), 2)})
+        if speed > effective_speed_limit:
+            all_violations.append({"track_id": track_id, "type": "OVERSPEEDING"})
+            overspeed_tracks.append({"track_id": track_id, "speed": round(float(speed), 2)})
+
+    max_speed = max((item["speed"] for item in speed_samples), default=0.0)
+    logger.info(
+        "ai_pipeline: source=%s raw_detections=%s tracked_objects=%s speed_limit=%.2f "
+        "max_speed=%.2f speed_samples=%s violations_pre_ocr=%s overspeed_tracks=%s",
+        source,
+        len(detections),
+        len(tracked_objects),
+        effective_speed_limit,
+        max_speed,
+        speed_samples[:5],
+        len(all_violations),
+        overspeed_tracks[:5],
+    )
+
+    violation_by_track: dict[int, list[str]] = {}
+    for violation in all_violations:
+        track_id = int(violation.get("track_id", -1))
+        vtype = str(violation.get("type", "")).strip().upper()
+        if track_id < 0 or not vtype:
+            continue
+        violation_by_track.setdefault(track_id, [])
+        if vtype not in violation_by_track[track_id]:
+            violation_by_track[track_id].append(vtype)
+
+    now = time.time()
+    stale_track_ids = [
+        track_id
+        for track_id, last_seen in _api_track_last_seen.items()
+        if (now - last_seen) > API_TRACK_STALE_SECONDS and track_id not in active_track_ids
+    ]
+    for track_id in stale_track_ids:
+        _api_track_last_seen.pop(track_id, None)
+        _api_track_violation_cache.pop(track_id, None)
+    for track_id in active_track_ids:
+        _api_track_last_seen[track_id] = now
+
+    detections_payload = []
+    tracks_with_violation = set(violation_by_track.keys())
+    tracks_with_plate = set()
+
+    for obj in tracked_objects:
+        track_id = int(getattr(obj, "track_id", -1))
+        if track_id not in violation_by_track:
+            continue
+
+        bbox = scale_bbox(obj.bbox, (proc_w, proc_h), (orig_w, orig_h))
+        plate = _extract_plate_from_crop(original_frame, bbox, plate_detector)
+        if plate:
+            tracks_with_plate.add(track_id)
+        else:
+            plate = "UNKNOWN"
+
+        for vtype in violation_by_track[track_id]:
+            emitted_for_track = _api_track_violation_cache.setdefault(track_id, set())
+            if vtype in emitted_for_track:
+                continue
+            emitted_for_track.add(vtype)
+            detections_payload.append(
+                {"track_id": track_id, "plate": plate, "type": vtype}
+            )
+
+    logger.info(
+        "ai_pipeline: tracks_with_violation=%s tracks_with_plate=%s final_detections=%s",
+        len(tracks_with_violation),
+        len(tracks_with_plate),
+        len(detections_payload),
+    )
+
+    return {"detections": detections_payload}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Real-time object detection with YOLOv8")
     parser.add_argument(
@@ -138,9 +341,24 @@ def parse_args() -> argparse.Namespace:
         help="Show cropped plate images used for OCR.",
     )
     parser.add_argument(
+        "--plate-model",
+        default=DEFAULT_PLATE_MODEL_PATH,
+        help=f"Path to YOLO plate model relative to ai-engine/ (default: {DEFAULT_PLATE_MODEL_PATH})",
+    )
+    parser.add_argument(
+        "--helmet-model",
+        default=DEFAULT_HELMET_MODEL_PATH,
+        help=f"Path to YOLO helmet model relative to ai-engine/ (default: {DEFAULT_HELMET_MODEL_PATH})",
+    )
+    parser.add_argument(
         "--debug-ocr",
         action="store_true",
         help="Print OCR pipeline decisions for each track.",
+    )
+    parser.add_argument(
+        "--debug-speed",
+        action="store_true",
+        help="Print raw px/s speed for every tracked vehicle each frame.",
     )
     parser.add_argument(
         "--disable-ocr",
@@ -163,6 +381,37 @@ def parse_args() -> argparse.Namespace:
         help="Use DeepSORT appearance embeddings for more stable IDs at the cost of lower FPS.",
     )
     return parser.parse_args()
+
+
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"message": "Smart Traffic AI engine is running"}
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/run")
+def run(request: RunRequest) -> dict:
+    payload_chars = len(request.image_base64 or "")
+    logger.info("ai_run: source=%s payload_b64_chars=%s", request.source, payload_chars)
+    try:
+        response = run_single_frame_detection(request.image_base64, source=request.source)
+        detections = response.get("detections", [])
+        logger.info(
+            "ai_run: detections_count=%s detections_sample=%s",
+            len(detections),
+            detections[:2],
+        )
+        return response
+    except HTTPException:
+        logger.exception("ai_run: http_error")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("AI engine /run failed")
+        raise HTTPException(status_code=500, detail=f"AI engine failed: {exc}") from exc
 
 
 def build_capture(source: str) -> cv2.VideoCapture:
@@ -260,7 +509,8 @@ def main() -> None:
         frame_size, process_every_n_frames, ocr_retry_interval_frames, max_detections = get_runtime_settings(args.source)
         detector = YOLODetector(model_path=args.model, conf_threshold=args.conf, max_detections=max_detections)
         tracker = ObjectTracker(use_appearance=args.accurate_tracking) if tracking_enabled else None
-        plate_detector = None if not ocr_enabled else PlateDetector()
+        plate_detector = None if not ocr_enabled else PlateDetector(model_path=args.plate_model)
+        helmet_detector = HelmetDetector(model_path=args.helmet_model)
     except Exception as exc:  # noqa: BLE001
         print(f"Error: Failed to initialize detector/tracker: {exc}")
         capture.release()
@@ -271,16 +521,18 @@ def main() -> None:
     frame_count = 0
     last_processed_fps = 0.0
     last_annotated_objects: list[AnnotatedTrackedObject] = []
+
     # Cache successful OCR output per track.
     known_plates: dict[int, Optional[str]] = {}
     plate_votes: dict[int, dict[str, int]] = {}
-    # Retry OCR periodically for tracks that previously failed (avoids one-shot misses).
+    # Retry OCR periodically for tracks that previously failed.
     last_ocr_attempt_frame: dict[int, int] = {}
     ocr_attempt_count: dict[int, int] = {}
     # Stabilize noisy tracker metadata across frames.
     track_class_cache: dict[int, str] = {}
     track_conf_cache: dict[int, float] = {}
     debug_state_cache: dict[int, str] = {}
+    total_signal_violations = 0
 
     try:
         while True:
@@ -296,9 +548,12 @@ def main() -> None:
 
             original_frame = frame
             orig_h, orig_w = original_frame.shape[:2]
-            frame = cv2.resize(frame, frame_size)
-            proc_h, proc_w = frame.shape[:2]
 
+            frame = cv2.resize(frame, FRAME_SIZE)
+            proc_h, proc_w = frame.shape[:2]
+            effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
+
+            # Run detector/tracker on every second frame for performance.
             frame_count += 1
             should_process = frame_count % process_every_n_frames == 0
 
@@ -358,12 +613,59 @@ def main() -> None:
 
             tracked_objects = tracker.update(detections, frame)
 
+            # ---------------------------------------------------------------- #
+            # FIX: build active ID set BEFORE calling estimate_speed so stale  #
+            # tracks are pruned and only this frame's speeds are returned.      #
+            # ---------------------------------------------------------------- #
+            active_track_ids = {
+                int(getattr(obj, "track_id", -1))
+                for obj in tracked_objects
+                if int(getattr(obj, "track_id", -1)) >= 0
+            }
+            speed_map = estimate_speed(tracked_objects, active_track_ids=active_track_ids)
+
+            if args.debug_speed and speed_map:
+                for tid, spd in speed_map.items():
+                    print(f"[SPEED] track={tid} speed={spd:.1f} px/s  limit={SPEED_LIMIT}")
+
             # Phase 4: violation detection on tracked objects.
             triple_v = detect_triple_riding(tracked_objects)
-            helmet_v = detect_no_helmet(tracked_objects)
-            all_violations = triple_v + helmet_v
+            helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
+            signal_v = detect_signal_violation(
+                tracked_objects,
+                effective_stop_line_y,
+                SIGNAL_STATE,
+            )
+            no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
+            all_violations = triple_v + helmet_v + signal_v + no_parking_v
 
-            # track_id -> violation text, merge multiple violations if needed.
+            for obj in tracked_objects:
+                track_id = int(getattr(obj, "track_id", -1))
+                # FIX: speed_map now returns only current-frame speeds, so
+                # .get() correctly returns None for tracks with no fresh sample.
+                speed = speed_map.get(track_id)
+                if speed is None:
+                    continue
+                if speed > SPEED_LIMIT:
+                    try:
+                        object.__setattr__(obj, "violation", "OVERSPEEDING")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    all_violations.append({"track_id": track_id, "type": "OVERSPEEDING"})
+
+            if signal_v:
+                total_signal_violations += len(signal_v)
+                print("Signal violations:", signal_v)
+
+            for v in all_violations:
+                for obj in tracked_objects:
+                    if obj.track_id == v["track_id"]:
+                        try:
+                            object.__setattr__(obj, "violation", v["type"])
+                        except Exception:  # noqa: BLE001
+                            pass
+
+            # track_id -> violation text, merge multiple violations.
             violation_map: dict[int, str] = {}
             for violation in all_violations:
                 track_id = int(violation.get("track_id", -1))
@@ -377,14 +679,17 @@ def main() -> None:
                 else:
                     violation_map[track_id] = vtype
 
-            # Precompute OCR-space bbox and largest track (used for full-frame fallback assignment).
+            # Precompute OCR-space bbox and largest track.
             bbox_for_ocr_map: dict[int, tuple[int, int, int, int]] = {}
             bbox_area_map: dict[int, int] = {}
             largest_track_id: Optional[int] = None
             largest_track_area = 0
             for tracked in tracked_objects:
                 scaled_bbox = scale_bbox(tracked.bbox, (proc_w, proc_h), (orig_w, orig_h))
-                area = max(0, scaled_bbox[2] - scaled_bbox[0]) * max(0, scaled_bbox[3] - scaled_bbox[1])
+                area = (
+                    max(0, scaled_bbox[2] - scaled_bbox[0])
+                    * max(0, scaled_bbox[3] - scaled_bbox[1])
+                )
                 bbox_for_ocr_map[tracked.track_id] = scaled_bbox
                 bbox_area_map[tracked.track_id] = area
                 if area > largest_track_area:
@@ -395,7 +700,6 @@ def main() -> None:
             full_frame_plate_text: Optional[str] = None
             full_frame_plate_crop: Optional[np.ndarray] = None
 
-            # Keep OCR cost bounded: only a small number of largest tracks get OCR attempts per frame.
             prioritized_track_ids = sorted(
                 bbox_area_map,
                 key=lambda tid: bbox_area_map.get(tid, 0),
@@ -418,9 +722,8 @@ def main() -> None:
 
                 plate = known_plates.get(obj.track_id)
 
-                # OCR/detection runs only for unseen plate tracks with retry backoff.
-                last_attempt = last_ocr_attempt_frame.get(obj.track_id, -ocr_retry_interval_frames)
-                should_retry_now = (frame_count - last_attempt) >= ocr_retry_interval_frames
+                last_attempt = last_ocr_attempt_frame.get(obj.track_id, -OCR_RETRY_INTERVAL_FRAMES)
+                should_retry_now = (frame_count - last_attempt) >= OCR_RETRY_INTERVAL_FRAMES
                 attempts_so_far = ocr_attempt_count.get(obj.track_id, 0)
                 is_vehicle_candidate = class_name in OCR_ALLOWED_CLASSES or is_vehicle_like_bbox(obj.bbox)
                 is_prioritized = obj.track_id in prioritized_track_set
@@ -435,13 +738,11 @@ def main() -> None:
                 ):
                     last_ocr_attempt_frame[obj.track_id] = frame_count
                     ocr_attempt_count[obj.track_id] = attempts_so_far + 1
-                    # Tracker bbox is on resized inference frame; remap to original frame for OCR quality.
                     bbox_for_ocr = bbox_for_ocr_map.get(obj.track_id, obj.bbox)
                     x1, y1, x2, y2 = bbox_for_ocr
                     bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
                     debug_reason = "skipped"
 
-                    # Run OCR gate primarily on bbox quality (class may be noisy, e.g., car -> person).
                     if effective_conf >= OCR_MIN_CONFIDENCE and bbox_area >= OCR_MIN_BBOX_AREA:
                         vehicle_crop = crop_vehicle_from_frame(original_frame, bbox_for_ocr)
 
@@ -482,7 +783,6 @@ def main() -> None:
                                 used_source = source_name
                                 break
 
-                        # If local crops fail, attempt one global full-frame plate detection per frame.
                         if OCR_ENABLE_FULL_FRAME_FALLBACK and not plate and obj.track_id == largest_track_id:
                             if not full_frame_plate_attempted:
                                 full_frame_plate_attempted = True
@@ -491,7 +791,11 @@ def main() -> None:
                                     if plate_detector is not None
                                     else None
                                 )
-                                full_frame_plate_text = extract_text(full_frame_plate_crop) if full_frame_plate_crop is not None else None
+                                full_frame_plate_text = (
+                                    extract_text(full_frame_plate_crop)
+                                    if full_frame_plate_crop is not None
+                                    else None
+                                )
 
                             if full_frame_plate_text:
                                 plate = full_frame_plate_text
@@ -562,6 +866,45 @@ def main() -> None:
 
             last_annotated_objects = annotated_objects
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
+            cv2.rectangle(
+                frame,
+                (NO_PARKING_ZONE[0], NO_PARKING_ZONE[1]),
+                (NO_PARKING_ZONE[2], NO_PARKING_ZONE[3]),
+                (255, 0, 0),
+                2,
+            )
+            cv2.putText(
+                frame,
+                "NO PARKING ZONE",
+                (NO_PARKING_ZONE[0], max(20, NO_PARKING_ZONE[1] - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            frame_width = frame.shape[1]
+            cv2.line(frame, (0, effective_stop_line_y), (frame_width, effective_stop_line_y), (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                f"Signal: {SIGNAL_STATE}  LineY: {effective_stop_line_y}",
+                (10, 55),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255) if SIGNAL_STATE == "RED" else (0, 180, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                frame,
+                f"Signal Violations: {total_signal_violations}",
+                (10, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
             current_time = time.perf_counter()
             fps = 1.0 / max(current_time - prev_time, 1e-6)

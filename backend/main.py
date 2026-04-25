@@ -7,12 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 try:
     from .config import settings
     from .pg_database import db_manager, initialize_tables
+    from .routers.challan import router as challan_router
     from .routers.detect import router as detect_router
+    from .routers.payment import router as payment_router
     from .routers.violation import router as violation_router
 except ImportError:
     from config import settings
     from pg_database import db_manager, initialize_tables
+    from routers.challan import router as challan_router
     from routers.detect import router as detect_router
+    from routers.payment import router as payment_router
     from routers.violation import router as violation_router
 
 
@@ -41,6 +45,8 @@ app.add_middleware(
 )
 
 app.include_router(detect_router)
+app.include_router(challan_router)
+app.include_router(payment_router)
 app.include_router(violation_router)
 
 
