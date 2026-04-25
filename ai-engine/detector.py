@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 
@@ -19,6 +19,7 @@ from ultralytics import YOLO
 
 # YOLO class IDs (COCO)
 TARGET_CLASS_IDS = {0, 2, 3}
+VEHICLE_CLASS_IDS = {2, 3, 5, 7}
 DEFAULT_MODEL_PATH = "yolov8n.pt"
 
 
@@ -40,10 +41,12 @@ class YOLODetector:
         model_path: str = DEFAULT_MODEL_PATH,
         conf_threshold: float = 0.6,
         max_detections: int = 20,
+        target_class_ids: Optional[Set[int]] = None,
     ) -> None:
         self.model_path = self._resolve_model_path(model_path)
         self.conf_threshold = conf_threshold
         self.max_detections = max_detections
+        self.target_class_ids = set(target_class_ids) if target_class_ids is not None else set(TARGET_CLASS_IDS)
         self.model = YOLO(self.model_path)
         try:
             self.model.fuse()
@@ -68,7 +71,7 @@ class YOLODetector:
             frame,
             conf=self.conf_threshold,
             max_det=self.max_detections,
-            classes=sorted(TARGET_CLASS_IDS),
+            classes=sorted(self.target_class_ids),
             verbose=False,
         )
         if not results:
@@ -79,12 +82,12 @@ class YOLODetector:
 
         for box in result.boxes:
             class_id = int(box.cls.item())
-            if class_id not in TARGET_CLASS_IDS:
+            if class_id not in self.target_class_ids:
                 continue
 
             confidence = float(box.conf.item())
             # Optimization 4: strict pre-tracker confidence filtering.
-            if confidence <= 0.5:
+            if confidence < self.conf_threshold:
                 continue
 
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -100,3 +103,19 @@ class YOLODetector:
             )
 
         return detections
+
+
+_VEHICLE_ONLY_DETECTOR: Optional[YOLODetector] = None
+
+
+def detect_vehicles(frame: np.ndarray) -> List[Detection]:
+    """Required helper: vehicle-only detections (car/motorcycle/bus/truck)."""
+    global _VEHICLE_ONLY_DETECTOR
+    if _VEHICLE_ONLY_DETECTOR is None:
+        _VEHICLE_ONLY_DETECTOR = YOLODetector(
+            model_path=DEFAULT_MODEL_PATH,
+            conf_threshold=0.35,
+            max_detections=50,
+            target_class_ids=VEHICLE_CLASS_IDS,
+        )
+    return _VEHICLE_ONLY_DETECTOR.detect(frame)

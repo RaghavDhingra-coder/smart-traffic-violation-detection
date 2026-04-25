@@ -162,6 +162,10 @@ def extract_text(image: np.ndarray) -> Optional[str]:
                 if score > best_score:
                     best_score = score
                     best_text = normalized
+                
+                # Early check: If we've found a solid >= 8 character plausible plate, don't waste time running OCR on the remaining variants.
+                if score >= 8 and is_plausible_plate(normalized):
+                    return normalized
     except Exception:  # noqa: BLE001
         return None
 

@@ -24,7 +24,6 @@ The current codebase is best run in this mode:
 - Helmet violation detection using `helmet_best.pt` with safe fallback
 - Triple riding detection
 - Signal violation detection
-- No parking detection
 - Overspeeding estimation
 - Challan creation flow in backend
 
@@ -204,6 +203,9 @@ You can also run the AI engine directly:
 cd ai-engine
 python3 main.py --source 0 --enable-tracking
 ```
+
+If you are already inside `ai-engine/`, run `python main.py ...` instead of `python ai-engine/main.py ...`.
+From the repository root, the equivalent command is `python ai-engine/main.py ...`.
 
 Useful flags:
 
