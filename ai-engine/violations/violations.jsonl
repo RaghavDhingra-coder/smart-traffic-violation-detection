@@ -14,3 +14,4 @@
 {"track_id": 12, "type": "SIGNAL_VIOLATION", "signal_state": "RED", "evidence_path": "violations\\track_12_20260426_024149_105848.jpg", "timestamp": "20260426_024149_105848"}
 {"track_id": 2, "type": "SIGNAL_VIOLATION", "signal_state": "RED", "evidence_path": "violations\\track_2_20260426_024619_572736.jpg", "timestamp": "20260426_024619_572736"}
 {"track_id": 12, "type": "SIGNAL_VIOLATION", "signal_state": "RED", "evidence_path": "violations\\track_12_20260426_024651_371307.jpg", "timestamp": "20260426_024651_371307"}
+{"track_id": 9, "type": "SIGNAL_VIOLATION", "signal_state": "RED"}
