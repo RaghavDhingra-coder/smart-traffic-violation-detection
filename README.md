@@ -24,7 +24,6 @@ The current codebase is best run in this mode:
 - Helmet violation detection using `helmet_best.pt` with safe fallback
 - Triple riding detection
 - Signal violation detection
-- No parking detection
 - Overspeeding estimation
 - Challan creation flow in backend
 

@@ -22,7 +22,6 @@ from speed_estimator import estimate_speed
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
 from violations.helmet import DEFAULT_HELMET_MODEL_PATH, HelmetDetector, detect_no_helmet
-from violations.no_parking import detect_no_parking
 from violations.signal import detect_signal_violation
 from violations.triple_riding import detect_triple_riding
 
@@ -56,7 +55,6 @@ STOP_LINE_Y = 170     # horizontal line across frame
 SPEED_LIMIT: float = 150.0      # px/s for local webcam / video file mode
 API_SPEED_LIMIT: float = 80.0   # px/s for browser-streamed API frames
 
-NO_PARKING_ZONE = (200, 200, 600, 500)  # (x1, y1, x2, y2)
 API_TRACK_STALE_SECONDS = 2.5
 
 app = FastAPI(title="Smart Traffic AI Engine", version="1.0.0")
@@ -234,8 +232,7 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
     triple_v = detect_triple_riding(tracked_objects)
     helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
     signal_v = detect_signal_violation(tracked_objects, effective_stop_line_y, SIGNAL_STATE)
-    no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
-    all_violations = triple_v + helmet_v + signal_v + no_parking_v
+    all_violations = triple_v + helmet_v + signal_v
 
     overspeed_tracks = []
     speed_samples = []
@@ -641,8 +638,7 @@ def main() -> None:
                 effective_stop_line_y,
                 SIGNAL_STATE,
             )
-            no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
-            all_violations = triple_v + helmet_v + signal_v + no_parking_v
+            all_violations = triple_v + helmet_v + signal_v
 
             for obj in tracked_objects:
                 track_id = int(getattr(obj, "track_id", -1))
@@ -871,23 +867,6 @@ def main() -> None:
 
             last_annotated_objects = annotated_objects
             draw_detections(frame, annotated_objects, class_names=detector.class_names, min_confidence=0.5)
-            cv2.rectangle(
-                frame,
-                (NO_PARKING_ZONE[0], NO_PARKING_ZONE[1]),
-                (NO_PARKING_ZONE[2], NO_PARKING_ZONE[3]),
-                (255, 0, 0),
-                2,
-            )
-            cv2.putText(
-                frame,
-                "NO PARKING ZONE",
-                (NO_PARKING_ZONE[0], max(20, NO_PARKING_ZONE[1] - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
             frame_width = frame.shape[1]
             cv2.line(frame, (0, effective_stop_line_y), (frame_width, effective_stop_line_y), (0, 0, 255), 2)
             cv2.putText(
