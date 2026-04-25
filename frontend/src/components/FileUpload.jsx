@@ -7,7 +7,7 @@ import ViolationCard from "./ViolationCard";
 export default function FileUpload({ onViolationsDetected }) {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [violations, setViolations] = useState([]);
+  const [detections, setDetections] = useState([]);
   const [meta, setMeta] = useState(null);
   const [error, setError] = useState("");
 
@@ -29,9 +29,10 @@ export default function FileUpload({ onViolationsDetected }) {
           setProgress(Math.round((progressEvent.loaded / total) * 100));
         },
       });
-      const receivedViolations = response.data.violations || [];
-      setViolations(receivedViolations);
-      setMeta({ totalFramesProcessed: response.data.total_frames_processed || 0, fileName: file.name });
+      const receivedDetections = response.data.detections || [];
+      const storedChallans = response.data.stored_challans || [];
+      setDetections(receivedDetections);
+      setMeta({ storedChallans: storedChallans.length, fileName: file.name });
       if (onViolationsDetected) {
         onViolationsDetected(response.data);
       }
@@ -73,18 +74,18 @@ export default function FileUpload({ onViolationsDetected }) {
             <span className="font-semibold text-slate-900">File:</span> {meta.fileName}
           </p>
           <p>
-            <span className="font-semibold text-slate-900">Frames processed:</span> {meta.totalFramesProcessed}
+            <span className="font-semibold text-slate-900">Stored challans:</span> {meta.storedChallans}
           </p>
         </div>
       ) : null}
 
       {error ? <p className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
 
-      {violations.length > 0 ? (
+      {detections.length > 0 ? (
         <div className="grid gap-4 lg:grid-cols-2">
-          {violations.map((violation, index) => (
+          {detections.map((violation, index) => (
             <ViolationCard
-              key={`${violation.type}-${index}`}
+              key={`${violation.type}-${violation.track_id ?? index}`}
               violation={{ ...violation, sourceLabel: "File upload" }}
             />
           ))}

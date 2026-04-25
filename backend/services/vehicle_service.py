@@ -1,13 +1,14 @@
 # TODO for vehicle-lookup-service: replace the stubbed registry flow with real Vaahan integration and richer cache invalidation.
 import json
 
-from redis import Redis
 from sqlalchemy.orm import Session
 
-from config import settings
-from models.vehicle import Vehicle
-
-redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
+try:
+    from ..models.vehicle import Vehicle
+    from ..redis_client import redis_client
+except ImportError:
+    from models.vehicle import Vehicle
+    from redis_client import redis_client
 
 
 async def get_vehicle_by_plate(plate: str, db: Session) -> dict:

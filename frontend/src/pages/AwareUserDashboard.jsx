@@ -14,16 +14,16 @@ export default function AwareUserDashboard() {
     event.preventDefault();
     try {
       setError("");
-      const response = await api.get(`/vehicle/${plate}`);
+      const response = await api.get(`/challan/${plate}`);
       setLookup(response.data);
     } catch (requestError) {
       setLookup(null);
-      setError(requestError.response?.data?.detail || "Could not fetch vehicle details.");
+      setError(requestError.response?.data?.detail || "Could not fetch challans.");
     }
   }
 
-  const relevantViolations = results.filter((item) => ["no_helmet", "trippling"].includes(item.type));
-  const pendingCount = lookup?.challans?.filter((item) => item.status === "pending").length || 0;
+  const relevantViolations = results.filter((item) => ["NO_HELMET", "TRIPPLING"].includes((item.type || "").toUpperCase()));
+  const pendingCount = lookup?.filter((item) => item.status === "UNPAID").length || 0;
 
   return (
     <div className="space-y-6">
@@ -33,7 +33,7 @@ export default function AwareUserDashboard() {
         <p className="mt-3 max-w-3xl text-sm text-slate-600 md:text-base">Upload an image or short clip to self-check common two-wheeler violations like helmet usage and trippling before you hit the road.</p>
       </section>
 
-      <FileUpload onViolationsDetected={(payload) => setResults(payload.violations || [])} />
+      <FileUpload onViolationsDetected={(payload) => setResults(payload.detections || [])} />
 
       <section className="rounded-[2rem] border border-white/70 bg-white p-6 shadow-panel">
         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">Self-Check Summary</p>
@@ -42,8 +42,7 @@ export default function AwareUserDashboard() {
             <div key={`${violation.type}-${index}`} className="rounded-2xl bg-slate-50 p-5">
               <p className="text-sm text-slate-500">Detected issue</p>
               <h3 className="mt-1 font-display text-xl font-semibold capitalize text-ink">{violation.type.replaceAll("_", " ")}</h3>
-              <p className="mt-2 text-sm text-slate-600">Confidence: {(violation.confidence * 100).toFixed(1)}%</p>
-              <p className="mt-2 text-sm text-slate-600">Plate read: {violation.plate_number || "Unknown"}</p>
+              <p className="mt-2 text-sm text-slate-600">Plate read: {violation.plate || "Unknown"}</p>
             </div>
           )) : <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-slate-500 md:col-span-2">Upload an image or video to see helmet and trippling analysis here.</div>}
         </div>
@@ -64,20 +63,16 @@ export default function AwareUserDashboard() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Vehicle status</p>
-                  <h3 className="mt-1 font-display text-2xl font-semibold text-ink">{lookup.vehicle.plate}</h3>
+                  <h3 className="mt-1 font-display text-2xl font-semibold text-ink">{plate || "N/A"}</h3>
                 </div>
-                <span className={`rounded-full px-4 py-2 text-sm font-semibold ${pendingCount > 0 ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>{pendingCount > 0 ? `${pendingCount} pending challan(s)` : "No pending challans"}</span>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Owner</p><p className="mt-1 font-semibold text-slate-900">{lookup.vehicle.owner_name}</p></div>
-                <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Vehicle Type</p><p className="mt-1 font-semibold text-slate-900">{lookup.vehicle.vehicle_type}</p></div>
+                <span className={`rounded-full px-4 py-2 text-sm font-semibold ${pendingCount > 0 ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>{pendingCount > 0 ? `${pendingCount} unpaid challan(s)` : "No unpaid challans"}</span>
               </div>
               <div className="space-y-3">
-                {lookup.challans.length > 0 ? lookup.challans.map((challan) => (
+                {lookup.length > 0 ? lookup.map((challan) => (
                   <div key={challan.id} className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-600">
                     <p className="font-semibold capitalize text-slate-900">{challan.violation_type.replaceAll("_", " ")}</p>
                     <p>Status: {challan.status}</p>
-                    <p>Amount: ?{challan.amount}</p>
+                    <p>Time: {new Date(challan.timestamp).toLocaleString()}</p>
                   </div>
                 )) : <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">No challans found for this vehicle.</div>}
               </div>
