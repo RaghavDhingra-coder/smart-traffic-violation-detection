@@ -293,7 +293,7 @@ Place model files inside `ai-engine/` as follows:
 - Vehicle detector:
   - `ai-engine/yolov8n.pt` (or pass a custom model with `--model`)
 - Plate detector (Phase 3):
-  - `ai-engine/models/plate_model.pt`
+  - `ai-engine/models/plate/best.pt`
 
 Expected structure:
 
@@ -301,12 +301,13 @@ Expected structure:
 ai-engine/
   ├── yolov8n.pt
   └── models/
-      └── plate_model.pt
+      └── plate/
+          └── best.pt
 ```
 
 Notes:
 
-- If `models/plate_model.pt` is missing, plate YOLO falls back to heuristic plate localization.
+- If `models/plate/best.pt` is missing, plate YOLO falls back to heuristic plate localization.
 - If you are running in Docker and add/replace model files, rebuild/restart the AI service.
 
 If you are running the AI engine in Docker and add a new model, restart that service:
@@ -336,6 +337,9 @@ python main.py --debug-ocr
 
 # Enable both
 python main.py --debug-plate --debug-ocr
+
+# Use a different plate model
+python main.py --plate-model models/plate/best.pt
 ```
 
 Debug log meanings:

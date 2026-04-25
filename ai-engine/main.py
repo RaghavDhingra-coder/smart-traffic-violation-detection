@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from detector import YOLODetector
 from ocr import crop_plate_from_vehicle, extract_text, is_plausible_plate, normalize_plate_text
-from plate_detector import PlateDetector
+from plate_detector import DEFAULT_PLATE_MODEL_PATH, PlateDetector
 from speed_estimator import estimate_speed
 from tracker import ObjectTracker
 from utils import draw_detections, draw_fps
@@ -338,6 +338,11 @@ def parse_args() -> argparse.Namespace:
         help="Show cropped plate images used for OCR.",
     )
     parser.add_argument(
+        "--plate-model",
+        default=DEFAULT_PLATE_MODEL_PATH,
+        help=f"Path to YOLO plate model relative to ai-engine/ (default: {DEFAULT_PLATE_MODEL_PATH})",
+    )
+    parser.add_argument(
         "--debug-ocr",
         action="store_true",
         help="Print OCR pipeline decisions for each track.",
@@ -496,7 +501,7 @@ def main() -> None:
         frame_size, process_every_n_frames, ocr_retry_interval_frames, max_detections = get_runtime_settings(args.source)
         detector = YOLODetector(model_path=args.model, conf_threshold=args.conf, max_detections=max_detections)
         tracker = ObjectTracker(use_appearance=args.accurate_tracking) if tracking_enabled else None
-        plate_detector = None if not ocr_enabled else PlateDetector()
+        plate_detector = None if not ocr_enabled else PlateDetector(model_path=args.plate_model)
     except Exception as exc:  # noqa: BLE001
         print(f"Error: Failed to initialize detector/tracker: {exc}")
         capture.release()
