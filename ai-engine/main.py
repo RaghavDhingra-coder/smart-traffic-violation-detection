@@ -155,7 +155,12 @@ def _get_runtime_components() -> tuple[YOLODetector, ObjectTracker, PlateDetecto
         _detector = YOLODetector(model_path="yolov8n.pt", conf_threshold=0.25)
     if _tracker is None:
         # API receives sparse frames, so confirm tracks faster and retain them longer.
-        _tracker = ObjectTracker(max_age=60, n_init=1, max_iou_distance=0.8)
+        _tracker = ObjectTracker(
+            max_age=60,
+            n_init=1,
+            max_iou_distance=0.8,
+            use_appearance=True,
+        )
     if _plate_detector is None:
         _plate_detector = PlateDetector()
     if _helmet_detector is None:
