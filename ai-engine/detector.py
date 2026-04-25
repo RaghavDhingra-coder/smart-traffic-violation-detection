@@ -87,7 +87,7 @@ class YOLODetector:
 
             confidence = float(box.conf.item())
             # Optimization 4: strict pre-tracker confidence filtering.
-            if confidence <= 0.5:
+            if confidence < self.conf_threshold:
                 continue
 
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())

@@ -163,6 +163,7 @@ _plate_detector: Optional[PlateDetector] = None
 _helmet_detector: Optional[HelmetDetector] = None
 _api_track_violation_cache: dict[int, set[str]] = {}
 _api_track_last_seen: dict[int, float] = {}
+_api_track_plate_cache: dict[int, str] = {}
 
 
 def _get_runtime_components() -> tuple[YOLODetector, ObjectTracker, PlateDetector, HelmetDetector]:
@@ -172,7 +173,7 @@ def _get_runtime_components() -> tuple[YOLODetector, ObjectTracker, PlateDetecto
         _detector = YOLODetector(
             model_path="yolov8n.pt",
             conf_threshold=0.25,
-            target_class_ids=VEHICLE_CLASS_IDS,
+            target_class_ids=VEHICLE_CLASS_IDS | {0},
         )
     if _tracker is None:
         # API receives sparse frames, so confirm tracks faster and retain them longer.
@@ -237,7 +238,7 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
     frame = cv2.resize(original_frame, target_size)
     proc_h, proc_w = frame.shape[:2]
     effective_stop_line_y = max(0, min(STOP_LINE_Y, proc_h - 1))
-    signal_state = get_signal_state(frame, SIGNAL_ROI, red_ratio_threshold=SIGNAL_RED_RATIO_THRESHOLD)
+    signal_state = "RED"
 
     detections = detector.detect(frame)
     tracked_objects = tracker.update(detections, frame)
@@ -260,9 +261,6 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
         effective_stop_line_y,
         signal_state,
         frame=frame,
-        line_buffer=SIGNAL_LINE_BUFFER_PX,
-        confirmation_frames=SIGNAL_CONFIRM_FRAMES,
-        stationary_motion_px=SIGNAL_STATIONARY_MOTION_PX,
         save_evidence=False,
     )
     all_violations = triple_v + helmet_v + signal_v
@@ -314,6 +312,7 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
     for track_id in stale_track_ids:
         _api_track_last_seen.pop(track_id, None)
         _api_track_violation_cache.pop(track_id, None)
+        _api_track_plate_cache.pop(track_id, None)
     for track_id in active_track_ids:
         _api_track_last_seen[track_id] = now
 
@@ -326,21 +325,29 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
         if track_id not in violation_by_track:
             continue
 
-        bbox = scale_bbox(obj.bbox, (proc_w, proc_h), (orig_w, orig_h))
-        plate = _extract_plate_from_crop(original_frame, bbox, plate_detector)
-        if plate:
-            tracks_with_plate.add(track_id)
+        plate = _api_track_plate_cache.get(track_id)
+        newly_found_plate = False
+
+        if not plate:
+            bbox = scale_bbox(obj.bbox, (proc_w, proc_h), (orig_w, orig_h))
+            plate = _extract_plate_from_crop(original_frame, bbox, plate_detector)
+            if plate:
+                _api_track_plate_cache[track_id] = plate
+                tracks_with_plate.add(track_id)
+                newly_found_plate = True
+            else:
+                plate = "UNKNOWN"
         else:
-            plate = "UNKNOWN"
+            tracks_with_plate.add(track_id)
+
+        emitted_for_track = _api_track_violation_cache.setdefault(track_id, set())
 
         for vtype in violation_by_track[track_id]:
-            emitted_for_track = _api_track_violation_cache.setdefault(track_id, set())
-            if vtype in emitted_for_track:
-                continue
-            emitted_for_track.add(vtype)
-            detections_payload.append(
-                {"track_id": track_id, "plate": plate, "type": vtype}
-            )
+            if vtype not in emitted_for_track or newly_found_plate:
+                emitted_for_track.add(vtype)
+                detections_payload.append(
+                    {"track_id": track_id, "plate": plate, "type": vtype}
+                )
 
     logger.info(
         "ai_pipeline: tracks_with_violation=%s tracks_with_plate=%s final_detections=%s",
@@ -636,7 +643,7 @@ def main() -> None:
             model_path=args.model,
             conf_threshold=args.conf,
             max_detections=max_detections,
-            target_class_ids=VEHICLE_CLASS_IDS,
+            target_class_ids=VEHICLE_CLASS_IDS | {0},
         )
         tracker = ObjectTracker(use_appearance=args.accurate_tracking) if tracking_enabled else None
         plate_detector = None if not ocr_enabled else PlateDetector(model_path=args.plate_model)

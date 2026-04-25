@@ -204,6 +204,9 @@ cd ai-engine
 python3 main.py --source 0 --enable-tracking
 ```
 
+If you are already inside `ai-engine/`, run `python main.py ...` instead of `python ai-engine/main.py ...`.
+From the repository root, the equivalent command is `python ai-engine/main.py ...`.
+
 Useful flags:
 
 ```bash

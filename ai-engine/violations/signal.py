@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -22,6 +23,19 @@ _ALLOWED_CLASSES = {"car", "motorcycle", "bus", "truck"}
 Point = tuple[int, int]
 
 
+@dataclass
+class SignalStabilityState:
+    # NEW: counters for stable signal classification to avoid flicker.
+    red_count: int = 0
+    green_count: int = 0
+    unknown_count: int = 0
+    signal_state: str = "UNKNOWN"
+
+
+# NEW: module-level stability state for continuous video inference.
+_SIGNAL_STABILITY = SignalStabilityState()
+
+
 def get_centroid(bbox: tuple[int, int, int, int]) -> Point:
     """Return centroid (x, y) from (x1, y1, x2, y2)."""
     x1, y1, x2, y2 = bbox
@@ -32,18 +46,17 @@ def check_line_crossing(
     prev_y: int,
     curr_y: int,
     line_y: int,
-    buffer: int = 5,
-    direction: str = "down",
+    direction: str = "both",
 ) -> bool:
-    """Line crossing with configurable direction: down, up, both."""
+    # NEW: support scene-dependent crossing direction.
     direction = str(direction).strip().lower()
-    crossed_down = prev_y < (line_y - buffer) and curr_y > (line_y + buffer)
-    crossed_up = prev_y > (line_y + buffer) and curr_y < (line_y - buffer)
+    crossed_up = prev_y > line_y and curr_y <= line_y
+    crossed_down = prev_y < line_y and curr_y >= line_y
     if direction == "up":
         return crossed_up
-    if direction == "both":
-        return crossed_down or crossed_up
-    return crossed_down
+    if direction == "down":
+        return crossed_down
+    return crossed_up or crossed_down
 
 
 def detect_violation(
@@ -51,76 +64,198 @@ def detect_violation(
     history: list[Point],
     signal_state: str,
     line_y: int,
-    buffer: int = 5,
-    direction: str = "down",
+    crossing_direction: str = "both",
 ) -> bool:
-    """Spec-required helper: RED signal + line crossing from history."""
     _ = track_id
     if signal_state != "RED" or len(history) < 2:
         return False
     prev_y = history[-2][1]
     curr_y = history[-1][1]
-    return check_line_crossing(prev_y, curr_y, line_y, buffer=buffer, direction=direction)
+    return check_line_crossing(prev_y, curr_y, line_y, direction=crossing_direction)
+
+
+def _clip_roi(
+    frame: np.ndarray,
+    roi: tuple[int, int, int, int],
+) -> tuple[int, int, int, int, np.ndarray]:
+    x1, y1, x2, y2 = roi
+    h, w = frame.shape[:2]
+
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+
+    return x1, y1, x2, y2, frame[y1:y2, x1:x2]
+
+
+def _classify_raw_signal(
+    roi_frame: np.ndarray,
+) -> tuple[str, np.ndarray, np.ndarray, float, float, float, float]:
+    # NEW: HSV signal detection using required thresholds + Gaussian blur.
+    blurred = cv2.GaussianBlur(roi_frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+
+    lower_red1 = np.array([0, 100, 100], dtype=np.uint8)
+    upper_red1 = np.array([10, 255, 255], dtype=np.uint8)
+    lower_red2 = np.array([160, 100, 100], dtype=np.uint8)
+    upper_red2 = np.array([180, 255, 255], dtype=np.uint8)
+
+    # NEW: slightly wider green hue range to handle camera tint/compression.
+    lower_green = np.array([35, 60, 60], dtype=np.uint8)
+    upper_green = np.array([95, 255, 255], dtype=np.uint8)
+
+    red_mask = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+
+    # NEW: denoise masks so small scattered pixels do not dominate decisions.
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    total_pixels = float(max(1, roi_frame.shape[0] * roi_frame.shape[1]))
+    red_ratio = float(np.count_nonzero(red_mask)) / total_pixels
+    green_ratio = float(np.count_nonzero(green_mask)) / total_pixels
+
+    # NEW: lamp-zone scoring (top third as RED lamp, bottom third as GREEN lamp).
+    h = roi_frame.shape[0]
+    top_h = max(1, h // 3)
+    bot_y = max(0, h - top_h)
+
+    red_top = red_mask[:top_h, :]
+    green_bottom = green_mask[bot_y:, :]
+    red_top_ratio = float(np.count_nonzero(red_top)) / float(max(1, red_top.size))
+    green_bottom_ratio = float(np.count_nonzero(green_bottom)) / float(max(1, green_bottom.size))
+
+    # NEW: blob-based scoring is more reliable than pure pixel ratio.
+    def _largest_component_score(mask: np.ndarray, expected: str) -> float:
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 1:
+            return 0.0
+        best = 0.0
+        for idx in range(1, num_labels):
+            area = float(stats[idx, cv2.CC_STAT_AREA])
+            if area < 6:  # tiny noise
+                continue
+            w_box = float(stats[idx, cv2.CC_STAT_WIDTH])
+            h_box = float(stats[idx, cv2.CC_STAT_HEIGHT])
+            if h_box <= 0:
+                continue
+            aspect = w_box / h_box
+            if aspect > 3.0 or aspect < 0.33:
+                continue
+            cy = float(centroids[idx][1]) / float(max(1, h))
+            # Position prior: red expected upper region, green lower-middle.
+            if expected == "red":
+                pos_weight = 1.0 if cy <= 0.62 else 0.45
+            else:
+                pos_weight = 1.0 if cy >= 0.28 else 0.45
+            score = (area / max(1.0, total_pixels)) * pos_weight
+            best = max(best, score)
+        return best
+
+    red_blob_score = _largest_component_score(red_mask, expected="red")
+    green_blob_score = _largest_component_score(green_mask, expected="green")
+
+    # NEW: keep a tie/deadband so transitions do not get forced into RED.
+    ratio_gap = abs(red_ratio - green_ratio)
+    raw_state = "UNKNOWN"
+    if green_blob_score > max(0.0015, red_blob_score * 1.25) and green_ratio > 0.006:
+        raw_state = "GREEN"
+    elif red_blob_score > max(0.0015, green_blob_score * 1.25) and red_ratio > 0.006:
+        raw_state = "RED"
+    elif green_bottom_ratio > (red_top_ratio * 1.35) and green_bottom_ratio > 0.006:
+        raw_state = "GREEN"
+    elif red_top_ratio > (green_bottom_ratio * 1.35) and red_top_ratio > 0.006:
+        raw_state = "RED"
+    elif green_ratio > max(0.010, red_ratio * 1.20):
+        raw_state = "GREEN"
+    elif red_ratio > max(0.010, green_ratio * 1.20):
+        raw_state = "RED"
+    elif ratio_gap < 0.004:
+        raw_state = "UNKNOWN"
+
+    return raw_state, red_mask, green_mask, red_ratio, green_ratio, red_top_ratio, green_bottom_ratio
 
 
 def get_signal_state(
     frame: np.ndarray,
     roi: tuple[int, int, int, int],
-    red_ratio_threshold: float = 0.03,
-) -> str:
-    """HSV-based signal state from fixed ROI. Returns RED or GREEN."""
-    x, y, w, h = roi
-    frame_h, frame_w = frame.shape[:2]
+    stability_frames: int = 3,
+    return_debug: bool = False,
+) -> str | tuple[str, dict[str, Any]]:
+    """
+    # NEW: Stable signal state detection from ROI.
 
-    x = max(0, min(x, frame_w - 1))
-    y = max(0, min(y, frame_h - 1))
-    w = max(1, min(w, frame_w - x))
-    h = max(1, min(h, frame_h - y))
-
-    roi_frame = frame[y : y + h, x : x + w]
+    Returns RED/GREEN/UNKNOWN with temporal stability:
+    - RED needs >= stability_frames consecutive raw RED
+    - GREEN needs >= stability_frames consecutive raw GREEN
+    """
+    x1, y1, x2, y2, roi_frame = _clip_roi(frame, roi)
     if roi_frame.size == 0:
-        return "GREEN"
+        if return_debug:
+            return "UNKNOWN", {
+                "roi": np.zeros((1, 1, 3), dtype=np.uint8),
+                "red_mask": np.zeros((1, 1), dtype=np.uint8),
+                "green_mask": np.zeros((1, 1), dtype=np.uint8),
+                "raw_state": "UNKNOWN",
+                "red_ratio": 0.0,
+                "green_ratio": 0.0,
+                "roi_coords": (x1, y1, x2, y2),
+            }
+        return "UNKNOWN"
 
-    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
+    raw_state, red_mask, green_mask, red_ratio, green_ratio, red_top_ratio, green_bottom_ratio = _classify_raw_signal(
+        roi_frame
+    )
 
-    lower_red_1 = np.array([0, 120, 120], dtype=np.uint8)
-    upper_red_1 = np.array([10, 255, 255], dtype=np.uint8)
-    lower_red_2 = np.array([160, 120, 120], dtype=np.uint8)
-    upper_red_2 = np.array([179, 255, 255], dtype=np.uint8)
+    # NEW: strict consecutive-frame stability logic (no long-tail inertia).
+    if raw_state == "RED":
+        _SIGNAL_STABILITY.red_count += 1
+        _SIGNAL_STABILITY.green_count = 0
+        _SIGNAL_STABILITY.unknown_count = 0
+    elif raw_state == "GREEN":
+        _SIGNAL_STABILITY.green_count += 1
+        _SIGNAL_STABILITY.red_count = 0
+        _SIGNAL_STABILITY.unknown_count = 0
+    else:
+        _SIGNAL_STABILITY.unknown_count += 1
+        _SIGNAL_STABILITY.red_count = 0
+        _SIGNAL_STABILITY.green_count = 0
 
-    lower_green = np.array([35, 60, 60], dtype=np.uint8)
-    upper_green = np.array([90, 255, 255], dtype=np.uint8)
+    if _SIGNAL_STABILITY.red_count >= stability_frames:
+        _SIGNAL_STABILITY.signal_state = "RED"
+    elif _SIGNAL_STABILITY.green_count >= stability_frames:
+        _SIGNAL_STABILITY.signal_state = "GREEN"
+    elif _SIGNAL_STABILITY.unknown_count >= stability_frames:
+        _SIGNAL_STABILITY.signal_state = "UNKNOWN"
 
-    red_mask = cv2.inRange(hsv, lower_red_1, upper_red_1) | cv2.inRange(hsv, lower_red_2, upper_red_2)
-    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+    if return_debug:
+        return _SIGNAL_STABILITY.signal_state, {
+            "roi": roi_frame,
+            "red_mask": red_mask,
+            "green_mask": green_mask,
+            "raw_state": raw_state,
+            "red_ratio": red_ratio,
+            "green_ratio": green_ratio,
+            "red_top_ratio": red_top_ratio,
+            "green_bottom_ratio": green_bottom_ratio,
+            "roi_coords": (x1, y1, x2, y2),
+        }
 
-    total_pixels = float(w * h)
-    red_ratio = float(np.count_nonzero(red_mask)) / max(1.0, total_pixels)
-    green_ratio = float(np.count_nonzero(green_mask)) / max(1.0, total_pixels)
-
-    if red_ratio >= red_ratio_threshold and red_ratio > (green_ratio * 1.1):
-        return "RED"
-    return "GREEN"
+    return _SIGNAL_STABILITY.signal_state
 
 
 class RedLightViolationEngine:
     """Stateful red-light violation detector with evidence + JSON logging."""
 
     def __init__(self) -> None:
+        # NEW: required tracking memory + duplicate prevention.
         self.track_history: dict[int, list[Point]] = defaultdict(list)
-        self.track_line_y_history: dict[int, list[int]] = defaultdict(list)
-        self.track_first_line_y: dict[int, int] = {}
         self.violated_ids: set[int] = set()
-        self.pending_confirmations: dict[int, int] = {}
         self._history_size = 64
-
-    def _is_stationary(self, history: list[Point], stationary_motion_px: int) -> bool:
-        if len(history) < 3:
-            return False
-        p1 = np.array(history[-1], dtype=np.float32)
-        p2 = np.array(history[-3], dtype=np.float32)
-        motion = float(np.linalg.norm(p1 - p2))
-        return motion < float(stationary_motion_px)
 
     @staticmethod
     def _save_evidence(frame: np.ndarray, track_id: int, evidence_dir: str) -> tuple[str, str]:
@@ -143,22 +278,14 @@ class RedLightViolationEngine:
         tracked_objects: Iterable[Any],
         stop_line_y: int,
         signal_state: str,
+        crossing_direction: str = "both",
         frame: Optional[np.ndarray] = None,
-        line_buffer: int = 5,
-        crossing_direction: str = "down",
-        crossing_point: str = "centroid",
-        allow_start_below: bool = False,
-        start_below_confirm_frames: int = 2,
-        confirmation_frames: int = 2,
-        stationary_motion_px: int = 3,
         save_evidence: bool = True,
         evidence_dir: str = "violations",
         json_log_path: str = "violations/violations.jsonl",
-        plate_hook: Optional[Callable[[Any], Optional[str]]] = None,
     ) -> list[dict[str, Any]]:
         violations: list[dict[str, Any]] = []
 
-        active_ids: set[int] = set()
         for obj in tracked_objects or []:
             track_id = int(getattr(obj, "track_id", -1))
             class_id = int(getattr(obj, "class_id", -1))
@@ -167,65 +294,22 @@ class RedLightViolationEngine:
             if track_id < 0 or class_name not in _ALLOWED_CLASSES or bbox is None or len(bbox) != 4:
                 continue
 
-            active_ids.add(track_id)
             centroid = get_centroid(tuple(map(int, bbox)))
             history = self.track_history[track_id]
             history.append(centroid)
             if len(history) > self._history_size:
                 del history[:-self._history_size]
 
-            # Crossing reference can be centroid or bottom edge of bbox.
-            cross_y = int(bbox[3]) if str(crossing_point).strip().lower() == "bottom" else centroid[1]
-            line_hist = self.track_line_y_history[track_id]
-            line_hist.append(cross_y)
-            if len(line_hist) > self._history_size:
-                del line_hist[:-self._history_size]
-            if track_id not in self.track_first_line_y:
-                self.track_first_line_y[track_id] = cross_y
-
             if track_id in self.violated_ids:
                 continue
 
-            if self._is_stationary(history, stationary_motion_px=stationary_motion_px):
-                self.pending_confirmations.pop(track_id, None)
-                continue
-
-            if detect_violation(
+            if not detect_violation(
                 track_id,
-                [(0, y) for y in line_hist],
+                history,
                 signal_state,
                 stop_line_y,
-                buffer=line_buffer,
-                direction=crossing_direction,
+                crossing_direction=crossing_direction,
             ):
-                self.pending_confirmations[track_id] = 1
-                continue
-
-            # Optional fallback for tracks that first appear already beyond line
-            # (e.g., late detection/occlusion in crowded scenes).
-            if allow_start_below and signal_state == "RED" and line_hist:
-                first_y = self.track_first_line_y.get(track_id, line_hist[0])
-                if first_y > (stop_line_y + line_buffer) and len(line_hist) >= max(1, int(start_below_confirm_frames)):
-                    recent = line_hist[-max(1, int(start_below_confirm_frames)) :]
-                    if all(y > (stop_line_y + line_buffer) for y in recent):
-                        self.pending_confirmations[track_id] = max(
-                            self.pending_confirmations.get(track_id, 0),
-                            max(1, int(confirmation_frames)),
-                        )
-
-            if track_id not in self.pending_confirmations:
-                continue
-
-            curr_y = history[-1][1]
-            if line_hist:
-                curr_y = line_hist[-1]
-            if signal_state == "RED" and curr_y > (stop_line_y + line_buffer):
-                self.pending_confirmations[track_id] += 1
-            else:
-                self.pending_confirmations.pop(track_id, None)
-                continue
-
-            if self.pending_confirmations[track_id] < max(1, int(confirmation_frames)):
                 continue
 
             payload: dict[str, Any] = {
@@ -238,19 +322,12 @@ class RedLightViolationEngine:
                 evidence_path, timestamp = self._save_evidence(frame, track_id, evidence_dir=evidence_dir)
                 payload["evidence_path"] = evidence_path
                 payload["timestamp"] = timestamp
-            if plate_hook is not None:
-                payload["license_plate"] = plate_hook(obj)
 
             if save_evidence:
                 self._append_json_log(json_log_path=json_log_path, payload=payload)
 
             self.violated_ids.add(track_id)
-            self.pending_confirmations.pop(track_id, None)
             violations.append(payload)
-
-        for stale_id in list(self.pending_confirmations.keys()):
-            if stale_id not in active_ids:
-                self.pending_confirmations.pop(stale_id, None)
 
         return violations
 
@@ -262,36 +339,22 @@ def detect_signal_violation(
     tracked_objects: Iterable[Any],
     stop_line_y: int,
     signal_state: str,
+    crossing_direction: str = "both",
     frame: Optional[np.ndarray] = None,
-    line_buffer: int = 5,
-    crossing_direction: str = "down",
-        crossing_point: str = "centroid",
-        allow_start_below: bool = False,
-        start_below_confirm_frames: int = 2,
-        confirmation_frames: int = 2,
-    stationary_motion_px: int = 3,
     save_evidence: bool = True,
     evidence_dir: str = "violations",
     json_log_path: str = "violations/violations.jsonl",
-    plate_hook: Optional[Callable[[Any], Optional[str]]] = None,
 ) -> list[dict[str, Any]]:
     """Backward-compatible wrapper around the stateful red-light engine."""
     return _ENGINE.update(
         tracked_objects=tracked_objects,
         stop_line_y=stop_line_y,
         signal_state=signal_state,
-        frame=frame,
-        line_buffer=line_buffer,
         crossing_direction=crossing_direction,
-        crossing_point=crossing_point,
-        allow_start_below=allow_start_below,
-        start_below_confirm_frames=start_below_confirm_frames,
-        confirmation_frames=confirmation_frames,
-        stationary_motion_px=stationary_motion_px,
+        frame=frame,
         save_evidence=save_evidence,
         evidence_dir=evidence_dir,
         json_log_path=json_log_path,
-        plate_hook=plate_hook,
     )
 
 

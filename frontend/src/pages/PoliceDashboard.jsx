@@ -11,6 +11,7 @@ const fineMap = {
   TRIPLE_RIDING: 1000,
   OVERSPEEDING: 2000,
   TRAFFIC_LIGHT_JUMP: 1000,
+  SIGNAL_VIOLATION: 1000,
   NO_NUMBER_PLATE: 5000,
 };
 
@@ -176,6 +177,7 @@ export default function PoliceDashboard() {
             <div className="rounded-[2rem] bg-white p-6 shadow-panel"><p className="text-sm text-slate-500">No Helmet</p><p className="mt-2 font-display text-3xl font-bold text-ink">?500</p></div>
             <div className="rounded-[2rem] bg-white p-6 shadow-panel"><p className="text-sm text-slate-500">Trippling</p><p className="mt-2 font-display text-3xl font-bold text-ink">?1000</p></div>
             <div className="rounded-[2rem] bg-white p-6 shadow-panel"><p className="text-sm text-slate-500">Overspeeding</p><p className="mt-2 font-display text-3xl font-bold text-ink">?2000</p></div>
+            <div className="rounded-[2rem] bg-white p-6 shadow-panel"><p className="text-sm text-slate-500">Signal Violation</p><p className="mt-2 font-display text-3xl font-bold text-ink">?1000</p></div>
             <div className="rounded-[2rem] bg-white p-6 shadow-panel"><p className="text-sm text-slate-500">No Number Plate</p><p className="mt-2 font-display text-3xl font-bold text-ink">?5000</p></div>
           </div>
         </section>
