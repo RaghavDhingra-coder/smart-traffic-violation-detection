@@ -256,7 +256,22 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
 
     triple_v = detect_triple_riding(tracked_objects)
     helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector, frame_count=0)
-    signal_v = detect_signal_violation(tracked_objects, effective_stop_line_y, SIGNAL_STATE)
+    signal_v = detect_signal_violation(
+        tracked_objects,
+        effective_stop_line_y,
+        signal_state,
+        line_buffer=SIGNAL_LINE_BUFFER_PX,
+        crossing_direction="both",
+        crossing_point="centroid",
+        allow_start_below=True,
+        start_below_confirm_frames=1,
+        confirmation_frames=SIGNAL_CONFIRM_FRAMES,
+        stationary_motion_px=0,
+        frame=frame,
+        save_evidence=True,
+        evidence_dir=SIGNAL_EVIDENCE_DIR,
+        json_log_path=SIGNAL_JSON_LOG_PATH,
+    )
     no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
     all_violations = triple_v + helmet_v + signal_v + no_parking_v
 
@@ -335,14 +350,10 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
         else:
             tracks_with_plate.add(track_id)
 
-        emitted_for_track = _api_track_violation_cache.setdefault(track_id, set())
-
         for vtype in violation_by_track[track_id]:
-            if vtype not in emitted_for_track or newly_found_plate:
-                emitted_for_track.add(vtype)
-                detections_payload.append(
-                    {"track_id": track_id, "plate": plate, "type": vtype}
-                )
+            detections_payload.append(
+                {"track_id": track_id, "plate": plate, "type": vtype}
+            )
 
     logger.info(
         "ai_pipeline: tracks_with_violation=%s tracks_with_plate=%s final_detections=%s",

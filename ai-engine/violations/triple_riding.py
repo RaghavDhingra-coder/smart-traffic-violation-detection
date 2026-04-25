@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 PERSON_CLASS_ID = 0
 BIKE_CLASS_IDS = {1, 3}
-_BIKE_TOP_EXPAND_RATIO = 0.85
+_BIKE_TOP_EXPAND_RATIO = 0.50
 
 
 def _intersection_area(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> int:
@@ -92,5 +92,6 @@ def detect_triple_riding(tracked_objects: Iterable[Any]) -> list[dict[str, Any]]
                     "count": overlap_count,
                 }
             )
+            break
 
     return violations

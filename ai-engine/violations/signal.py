@@ -42,6 +42,15 @@ def get_centroid(bbox: tuple[int, int, int, int]) -> Point:
     return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 
+def get_reference_point(bbox: tuple[int, int, int, int], crossing_point: str = "centroid") -> Point:
+    """Return either centroid or bottom-center point from bbox."""
+    x1, y1, x2, y2 = bbox
+    mode = str(crossing_point).strip().lower()
+    if mode == "bottom":
+        return ((x1 + x2) // 2, y2)
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
 def check_line_crossing(
     prev_y: int,
     curr_y: int,
@@ -65,13 +74,51 @@ def detect_violation(
     signal_state: str,
     line_y: int,
     crossing_direction: str = "both",
+    line_buffer: int = 0,
+    allow_start_below: bool = False,
+    start_below_confirm_frames: int = 2,
+    stationary_motion_px: int = 3,
 ) -> bool:
     _ = track_id
-    if signal_state != "RED" or len(history) < 2:
+    if signal_state != "RED":
         return False
+
+    if len(history) < 2:
+        return False
+
+    upper_line = int(line_y) - max(0, int(line_buffer))
+    lower_line = int(line_y) + max(0, int(line_buffer))
+
     prev_y = history[-2][1]
     curr_y = history[-1][1]
-    return check_line_crossing(prev_y, curr_y, line_y, direction=crossing_direction)
+
+    crossed_up = prev_y > lower_line and curr_y <= upper_line
+    crossed_down = prev_y < upper_line and curr_y >= lower_line
+
+    direction = str(crossing_direction).strip().lower()
+    if direction == "up" and crossed_up:
+        return True
+    if direction == "down" and crossed_down:
+        return True
+    if direction == "both" and (crossed_up or crossed_down):
+        return True
+
+    if not allow_start_below:
+        return False
+
+    if len(history) < max(1, int(start_below_confirm_frames)):
+        return False
+
+    first_y = history[0][1]
+    motion = abs(history[-1][1] - history[0][1])
+    if motion < max(0, int(stationary_motion_px)):
+        return False
+
+    if direction == "down":
+        return first_y >= lower_line
+    if direction == "up":
+        return first_y <= upper_line
+    return first_y >= lower_line or first_y <= upper_line
 
 
 def _clip_roi(
@@ -184,6 +231,7 @@ def get_signal_state(
     frame: np.ndarray,
     roi: tuple[int, int, int, int],
     stability_frames: int = 3,
+    red_ratio_threshold: float = 0.006,
     return_debug: bool = False,
 ) -> str | tuple[str, dict[str, Any]]:
     """
@@ -193,6 +241,7 @@ def get_signal_state(
     - RED needs >= stability_frames consecutive raw RED
     - GREEN needs >= stability_frames consecutive raw GREEN
     """
+    _ = red_ratio_threshold
     x1, y1, x2, y2, roi_frame = _clip_roi(frame, roi)
     if roi_frame.size == 0:
         if return_debug:
@@ -279,6 +328,11 @@ class RedLightViolationEngine:
         stop_line_y: int,
         signal_state: str,
         crossing_direction: str = "both",
+        line_buffer: int = 0,
+        crossing_point: str = "centroid",
+        allow_start_below: bool = False,
+        start_below_confirm_frames: int = 2,
+        stationary_motion_px: int = 3,
         frame: Optional[np.ndarray] = None,
         save_evidence: bool = True,
         evidence_dir: str = "violations",
@@ -294,7 +348,7 @@ class RedLightViolationEngine:
             if track_id < 0 or class_name not in _ALLOWED_CLASSES or bbox is None or len(bbox) != 4:
                 continue
 
-            centroid = get_centroid(tuple(map(int, bbox)))
+            centroid = get_reference_point(tuple(map(int, bbox)), crossing_point=crossing_point)
             history = self.track_history[track_id]
             history.append(centroid)
             if len(history) > self._history_size:
@@ -309,6 +363,10 @@ class RedLightViolationEngine:
                 signal_state,
                 stop_line_y,
                 crossing_direction=crossing_direction,
+                line_buffer=line_buffer,
+                allow_start_below=allow_start_below,
+                start_below_confirm_frames=start_below_confirm_frames,
+                stationary_motion_px=stationary_motion_px,
             ):
                 continue
 
@@ -340,17 +398,29 @@ def detect_signal_violation(
     stop_line_y: int,
     signal_state: str,
     crossing_direction: str = "both",
+    line_buffer: int = 0,
+    crossing_point: str = "centroid",
+    allow_start_below: bool = False,
+    start_below_confirm_frames: int = 2,
+    confirmation_frames: int = 2,
+    stationary_motion_px: int = 3,
     frame: Optional[np.ndarray] = None,
     save_evidence: bool = True,
     evidence_dir: str = "violations",
     json_log_path: str = "violations/violations.jsonl",
 ) -> list[dict[str, Any]]:
     """Backward-compatible wrapper around the stateful red-light engine."""
+    _ = confirmation_frames
     return _ENGINE.update(
         tracked_objects=tracked_objects,
         stop_line_y=stop_line_y,
         signal_state=signal_state,
         crossing_direction=crossing_direction,
+        line_buffer=line_buffer,
+        crossing_point=crossing_point,
+        allow_start_below=allow_start_below,
+        start_below_confirm_frames=start_below_confirm_frames,
+        stationary_motion_px=stationary_motion_px,
         frame=frame,
         save_evidence=save_evidence,
         evidence_dir=evidence_dir,

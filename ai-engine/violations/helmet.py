@@ -21,7 +21,7 @@ PERSON_CLASS_ID = 0
 BIKE_CLASS_IDS = {1, 3}
 WITH_HELMET_LABELS = {"helmet", "with helmet"}
 WITHOUT_HELMET_LABELS = {"no helmet", "without helmet", "without_helmet", "no_helmet"}
-HELMET_CONFIDENCE_THRESHOLD = 0.35
+HELMET_CONFIDENCE_THRESHOLD = 0.60
 HEAD_REGION_HEIGHT_RATIO = 0.55
 HEAD_REGION_WIDTH_PAD_RATIO = 0.12
 
@@ -168,7 +168,7 @@ class HelmetDetector:
             elif label in WITHOUT_HELMET_LABELS:
                 best_without = max(best_without, confidence)
 
-        return best_without >= self.conf_threshold and best_without >= best_with
+        return best_without >= self.conf_threshold and best_without > (best_with + 0.15)
 
     def batch_predict_helmets(
         self,
