@@ -232,7 +232,7 @@ def run_single_frame_detection(image_base64: str, source: str = "webcam") -> dic
     speed_map = estimate_speed(tracked_objects, active_track_ids=active_track_ids)
 
     triple_v = detect_triple_riding(tracked_objects)
-    helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
+    helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector, frame_count=0)
     signal_v = detect_signal_violation(tracked_objects, effective_stop_line_y, SIGNAL_STATE)
     no_parking_v = detect_no_parking(tracked_objects, NO_PARKING_ZONE)
     all_violations = triple_v + helmet_v + signal_v + no_parking_v
@@ -635,7 +635,7 @@ def main() -> None:
 
             # Phase 4: violation detection on tracked objects.
             triple_v = detect_triple_riding(tracked_objects)
-            helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector)
+            helmet_v = detect_no_helmet(tracked_objects, frame, helmet_detector, frame_count=frame_count)
             signal_v = detect_signal_violation(
                 tracked_objects,
                 effective_stop_line_y,

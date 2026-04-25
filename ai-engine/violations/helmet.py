@@ -170,6 +170,25 @@ class HelmetDetector:
 
         return best_without >= self.conf_threshold and best_without >= best_with
 
+    def batch_predict_helmets(
+        self,
+        frame: np.ndarray,
+        rider_bboxes: list[tuple[int, int, int, int]],
+    ) -> list[bool]:
+        """
+        Detect helmets for multiple riders efficiently.
+
+        Returns list of bools, one per rider (True = no helmet detected).
+        """
+        if not self.is_available or self.model is None or not rider_bboxes:
+            return [False] * len(rider_bboxes)
+
+        results_list = []
+        for bbox in rider_bboxes:
+            results_list.append(self.predicts_no_helmet(frame, bbox))
+
+        return results_list
+
 
 def _placeholder_detect_no_helmet(tracked_objects: Iterable[Any]) -> list[dict[str, Any]]:
     """Fallback heuristic used when the trained helmet model is unavailable."""
@@ -206,16 +225,37 @@ def _placeholder_detect_no_helmet(tracked_objects: Iterable[Any]) -> list[dict[s
     return violations
 
 
+# Global cache for helmet violation status per track
+_helmet_violation_cache: dict[int, bool] = {}
+_helmet_cache_ttl: dict[int, int] = {}  # frame count
+_helmet_check_frame_count: dict[int, int] = {}  # track how many frames we've checked without finding violation
+
+
 def detect_no_helmet(
     tracked_objects: Iterable[Any],
     frame: Optional[np.ndarray] = None,
     helmet_detector: Optional[HelmetDetector] = None,
+    frame_count: int = 0,
+    cache_ttl_frames: int = 15,
+    max_check_frames: int = 60,
 ) -> list[dict[str, Any]]:
     """
     Detect helmet violations using the trained YOLO model when available.
 
     Falls back to the previous heuristic if no model/frame is available.
+    Uses caching to skip redundant checks on stable tracks.
+    Stops checking tracks after max_check_frames if no violation is found.
+
+    Args:
+        tracked_objects: Objects to check
+        frame: Frame for helmet detection
+        helmet_detector: Helmet model detector
+        frame_count: Current frame number (used for cache TTL)
+        cache_ttl_frames: Frames to cache helmet status before re-checking (default: 15)
+        max_check_frames: Stop checking track after this many frames without violation (default: 60)
     """
+    global _helmet_violation_cache, _helmet_cache_ttl, _helmet_check_frame_count
+
     objects = list(tracked_objects or [])
     if not objects:
         return []
@@ -228,6 +268,14 @@ def detect_no_helmet(
     ):
         return _placeholder_detect_no_helmet(objects)
 
+    # Clean stale cache entries
+    current_frames = set(int(getattr(obj, "track_id", -1)) for obj in objects if int(getattr(obj, "track_id", -1)) >= 0)
+    for track_id in list(_helmet_cache_ttl.keys()):
+        if track_id not in current_frames or (frame_count - _helmet_cache_ttl[track_id]) > cache_ttl_frames:
+            _helmet_violation_cache.pop(track_id, None)
+            _helmet_cache_ttl.pop(track_id, None)
+            _helmet_check_frame_count.pop(track_id, None)
+
     persons = [obj for obj in objects if getattr(obj, "class_id", -1) == PERSON_CLASS_ID]
     motorcycles = [obj for obj in objects if getattr(obj, "class_id", -1) in BIKE_CLASS_IDS]
 
@@ -238,6 +286,24 @@ def detect_no_helmet(
         if mbox is None or track_id < 0:
             continue
 
+        # Check if we've already determined this track is clean (no violation after max_check_frames)
+        check_count = _helmet_check_frame_count.get(track_id, 0)
+        if check_count >= max_check_frames and track_id not in _helmet_violation_cache:
+            # Stop checking this track
+            _helmet_violation_cache[track_id] = False
+            continue
+
+        # Check cache first
+        if track_id in _helmet_violation_cache:
+            if _helmet_violation_cache[track_id]:
+                violations.append(
+                    {
+                        "track_id": track_id,
+                        "type": "NO_HELMET",
+                    }
+                )
+            continue
+
         associated_riders = [
             person
             for person in persons
@@ -245,9 +311,23 @@ def detect_no_helmet(
             and _is_rider_associated(getattr(person, "bbox"), mbox)
         ]
         if not associated_riders:
+            _helmet_violation_cache[track_id] = False
+            _helmet_cache_ttl[track_id] = frame_count
+            _helmet_check_frame_count[track_id] = check_count + 1
             continue
 
-        if any(helmet_detector.predicts_no_helmet(frame, getattr(rider, "bbox")) for rider in associated_riders):
+        # Increment frame count for this track
+        _helmet_check_frame_count[track_id] = check_count + 1
+
+        # Batch detect helmets for all riders
+        rider_bboxes = [getattr(rider, "bbox") for rider in associated_riders]
+        helmet_results = helmet_detector.batch_predict_helmets(frame, rider_bboxes)
+
+        has_violation = any(helmet_results)
+        _helmet_violation_cache[track_id] = has_violation
+        _helmet_cache_ttl[track_id] = frame_count
+
+        if has_violation:
             violations.append(
                 {
                     "track_id": track_id,
